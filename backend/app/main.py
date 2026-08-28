@@ -2,21 +2,21 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from contracts.models import (InvoiceEvaluationRequest, MarketRequest, OpportunityCreate, OpportunityRecord,
-    PlatformMetrics, Settlement, utc_now)
+from contracts.models import (AuditEvent, InvoiceEvaluationRequest, MarketRequest, OpportunityCreate,
+    OpportunityRecord, PlatformMetrics, Provider, Settlement, utc_now)
 from .config import Settings
 from .fixtures import scenarios
 from .matching import rank_offers
 from .services import IntegrationClient
-from .storage import Store
+from .store_factory import create_store
 
-settings = Settings(); store = Store(settings.db_path); integrations = IntegrationClient(settings)
+settings = Settings(); store = create_store(settings); integrations = IntegrationClient(settings)
 app = FastAPI(title="PRATIN Capital Allocation Engine", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/health")
-def health(): return {"status": "ok", "service": "pratin-core", "mode": settings.integration_mode, "version": "1.0.0"}
+def health(): return {"status": "ok", "service": "pratin-core", "mode": settings.integration_mode, "database": store.backend, "version": "1.0.0"}
 
 @app.get("/api/scenarios")
 def demo_scenarios(): return {key: value.model_dump(mode="json") for key, value in scenarios().items()}
@@ -40,8 +40,8 @@ def get_opportunity(item_id: str):
     if not item: raise HTTPException(404, "Opportunity not found")
     return item
 
-@app.post("/api/opportunities/{item_id}/run-market", response_model=OpportunityRecord)
-async def run_market(item_id: str):
+async def clear_market(item_id: str) -> OpportunityRecord:
+    """Run the reusable backend-owned allocation workflow for one opportunity."""
     item = store.get_opportunity(item_id)
     if not item: raise HTTPException(404, "Opportunity not found")
     if item.status == "SETTLED": raise HTTPException(409, "Settled opportunities cannot be rerun")
@@ -58,6 +58,10 @@ async def run_market(item_id: str):
     store.save_opportunity(item); store.audit("MARKET_CLEARED", f"{len(market.offers)} providers evaluated; recommendation {decision.recommended_offer_id or 'none'}.", item.id)
     return item
 
+@app.post("/api/opportunities/{item_id}/run-market", response_model=OpportunityRecord)
+async def run_market(item_id: str):
+    return await clear_market(item_id)
+
 @app.post("/api/opportunities/{item_id}/accept/{offer_id}", response_model=Settlement)
 def accept(item_id: str, offer_id: str):
     item = store.get_opportunity(item_id)
@@ -65,13 +69,13 @@ def accept(item_id: str, offer_id: str):
     try: return store.settle(item, offer_id)
     except ValueError as exc: raise HTTPException(409, str(exc)) from exc
 
-@app.get("/api/providers")
+@app.get("/api/providers", response_model=list[Provider])
 def get_providers(): return store.providers()
 
-@app.get("/api/settlements")
+@app.get("/api/settlements", response_model=list[Settlement])
 def get_settlements(): return store.settlements()
 
-@app.get("/api/audit")
+@app.get("/api/audit", response_model=list[AuditEvent])
 def get_audit(): return store.audits()
 
 @app.get("/api/platform/metrics", response_model=PlatformMetrics)
@@ -83,4 +87,3 @@ def metrics():
         active_opportunities=sum(i.status != "SETTLED" for i in opportunities), offers_generated=len(offers),
         financing_allocated=sum(s.amount for s in settlements), settlements=len(settlements),
         provider_participation_rate=round(participating / max(len(providers), 1), 2))
-

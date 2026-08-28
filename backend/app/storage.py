@@ -10,6 +10,8 @@ from contracts.models import AuditEvent, OpportunityRecord, Provider, Settlement
 from .fixtures import providers as fixture_providers
 
 class Store:
+    backend = "sqlite"
+
     def __init__(self, path: str):
         self.path = path
         self.lock = RLock()
@@ -22,6 +24,10 @@ class Store:
         connection.row_factory = sqlite3.Row
         try:
             yield connection
+        except Exception:
+            connection.rollback()
+            raise
+        else:
             connection.commit()
         finally:
             connection.close()
@@ -67,32 +73,99 @@ class Store:
         return [Settlement.model_validate_json(row[0]) for row in rows]
 
     def settle(self, opportunity: OpportunityRecord, offer_id: str) -> Settlement:
-        with self.lock:
-            if self.settlement_for(opportunity.id): raise ValueError("Opportunity has already been settled")
-            if not opportunity.match or offer_id != opportunity.match.recommended_offer_id: raise ValueError("Only the recommended eligible offer can be accepted")
-            ranked = next((r for r in opportunity.match.ranked_offers if r.offer.id == offer_id), None)
-            if not ranked or not ranked.eligible or not ranked.offer.financed_amount: raise ValueError("Offer is not eligible")
-            provider = next(p for p in self.providers() if p.id == ranked.offer.provider_id)
+        with self.lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing_row = db.execute(
+                "SELECT payload FROM settlements WHERE opportunity_id=?", (opportunity.id,)
+            ).fetchone()
+            if existing_row:
+                existing = Settlement.model_validate_json(existing_row[0])
+                if existing.offer_id == offer_id:
+                    return existing
+                raise ValueError("Opportunity has already been settled with a different offer")
+
+            opportunity_row = db.execute(
+                "SELECT payload FROM opportunities WHERE id=?", (opportunity.id,)
+            ).fetchone()
+            if not opportunity_row:
+                raise ValueError("Opportunity no longer exists")
+            current = OpportunityRecord.model_validate_json(opportunity_row[0])
+            if not current.match or offer_id != current.match.recommended_offer_id:
+                raise ValueError("Only the current recommended eligible offer can be accepted")
+            ranked = next((r for r in current.match.ranked_offers if r.offer.id == offer_id), None)
+            if not ranked or not ranked.eligible or not ranked.offer.financed_amount:
+                raise ValueError("Offer is not eligible")
+
+            provider_row = db.execute(
+                "SELECT payload FROM providers WHERE id=?", (ranked.offer.provider_id,)
+            ).fetchone()
+            if not provider_row:
+                raise ValueError("MARKET_STATE_CHANGED — provider no longer exists; rerun allocation")
+            provider = Provider.model_validate_json(provider_row[0])
             amount = ranked.offer.financed_amount
-            if provider.available_liquidity < amount: raise ValueError("Provider liquidity changed; rerun the market")
-            updated = provider.model_copy(update={"available_liquidity": provider.available_liquidity - amount,
-                "current_exposure": provider.current_exposure + amount})
-            settlement = Settlement(id="STL-" + uuid4().hex[:10].upper(), opportunity_id=opportunity.id,
-                offer_id=offer_id, provider_id=provider.id, amount=amount, settled_at=utc_now())
-            opportunity = opportunity.model_copy(update={"status": "SETTLED"})
-            with self.connect() as db:
-                db.execute("UPDATE providers SET payload=? WHERE id=?", (updated.model_dump_json(), updated.id))
-                db.execute("INSERT INTO settlements VALUES (?, ?, ?)", (settlement.id, opportunity.id, settlement.model_dump_json()))
-                db.execute("UPDATE opportunities SET payload=? WHERE id=?", (opportunity.model_dump_json(), opportunity.id))
-            self.audit("SETTLEMENT_COMPLETED", f"₹{amount:,.0f} simulated allocation settled with {provider.name}; liquidity and exposure updated.", opportunity.id)
+            projected_exposure = provider.current_exposure + amount
+            projected_concentration = projected_exposure / provider.portfolio_capacity
+            stale_reasons: list[str] = []
+            if provider.available_liquidity < amount:
+                stale_reasons.append("available liquidity is insufficient")
+            if amount > provider.max_ticket_size:
+                stale_reasons.append("ticket size limit is exceeded")
+            if projected_exposure > provider.portfolio_capacity:
+                stale_reasons.append("portfolio capacity is exceeded")
+            if projected_concentration > provider.max_concentration_ratio:
+                stale_reasons.append("portfolio concentration limit is exceeded")
+            if stale_reasons:
+                raise ValueError(
+                    "MARKET_STATE_CHANGED — " + "; ".join(stale_reasons) + "; rerun allocation"
+                )
+
+            updated = provider.model_copy(update={
+                "available_liquidity": provider.available_liquidity - amount,
+                "current_exposure": projected_exposure,
+            })
+            settlement = Settlement(
+                id="STL-" + uuid4().hex[:10].upper(),
+                opportunity_id=current.id,
+                offer_id=offer_id,
+                provider_id=provider.id,
+                amount=amount,
+                settled_at=utc_now(),
+            )
+            settled_opportunity = current.model_copy(update={"status": "SETTLED"})
+            event = AuditEvent(
+                id="AUD-" + uuid4().hex[:10].upper(),
+                timestamp=utc_now(),
+                event_type="SETTLEMENT_COMPLETED",
+                opportunity_id=current.id,
+                detail=(
+                    f"₹{amount:,.0f} simulated allocation settled with {provider.name}; "
+                    "liquidity and exposure updated."
+                ),
+            )
+            db.execute("UPDATE providers SET payload=? WHERE id=?", (updated.model_dump_json(), updated.id))
+            db.execute(
+                "INSERT INTO settlements VALUES (?, ?, ?)",
+                (settlement.id, current.id, settlement.model_dump_json()),
+            )
+            db.execute(
+                "UPDATE opportunities SET payload=? WHERE id=?",
+                (settled_opportunity.model_dump_json(), current.id),
+            )
+            self._insert_audit(db, event)
             return settlement
 
     def audit(self, event_type: str, detail: str, opportunity_id: str | None = None):
         event = AuditEvent(id="AUD-" + uuid4().hex[:10].upper(), timestamp=utc_now(), event_type=event_type,
             opportunity_id=opportunity_id, detail=detail)
-        with self.connect() as db: db.execute("INSERT INTO audit VALUES (?, ?, ?)", (event.id, event.timestamp.isoformat(), event.model_dump_json()))
+        with self.connect() as db:
+            self._insert_audit(db, event)
+
+    def _insert_audit(self, db: sqlite3.Connection, event: AuditEvent):
+        db.execute(
+            "INSERT INTO audit VALUES (?, ?, ?)",
+            (event.id, event.timestamp.isoformat(), event.model_dump_json()),
+        )
 
     def audits(self) -> list[AuditEvent]:
         with self.connect() as db: rows = db.execute("SELECT payload FROM audit ORDER BY timestamp DESC").fetchall()
         return [AuditEvent.model_validate_json(row[0]) for row in rows]
-

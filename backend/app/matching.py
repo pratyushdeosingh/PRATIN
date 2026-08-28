@@ -1,7 +1,20 @@
-"""Hard constraints followed by an explainable multi-objective score."""
+"""Hard constraints followed by the canonical explainable matching policy."""
+from math import isclose
+
 from contracts.models import FinancingRequirements, MatchDecision, Offer, RankedOffer, RiskAssessment, ScoreFactor
 
-WEIGHTS = {"capital": .28, "cost": .32, "speed": .16, "tenor": .08, "risk_return": .08, "liquidity": .08}
+MATCHING_POLICY_VERSION = "matching-policy-1.1-demo"
+WEIGHTS = {
+    "capital": .28,
+    "cost": .32,
+    "speed": .16,
+    "tenor": .08,
+    "risk_return": .08,
+    "liquidity": .08,
+}
+
+if not isclose(sum(WEIGHTS.values()), 1.0):
+    raise RuntimeError("Matching policy weights must sum to 1.0")
 
 def rank_offers(opportunity_id: str, requirements: FinancingRequirements, risk: RiskAssessment,
                 offers: list[Offer], liquidity: dict[str, float]) -> MatchDecision:
@@ -49,5 +62,10 @@ def rank_offers(opportunity_id: str, requirements: FinancingRequirements, risk: 
         f"It leads the weighted two-sided suitability policy at {winner.suitability_score:.1f}/100.",
         "The recommendation balances usable capital, effective cost, speed, tenor, provider return and remaining liquidity.",
     ]
-    return MatchDecision(opportunity_id=opportunity_id, recommended_offer_id=winner.offer.id if winner else None,
-                         ranked_offers=ranked, recommendation_reasons=reasons or ["No provider offer satisfies every hard constraint."])
+    return MatchDecision(
+        opportunity_id=opportunity_id,
+        recommended_offer_id=winner.offer.id if winner else None,
+        ranked_offers=ranked,
+        recommendation_reasons=reasons or ["No provider offer satisfies every hard constraint."],
+        policy_version=MATCHING_POLICY_VERSION,
+    )
