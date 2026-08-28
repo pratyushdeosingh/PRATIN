@@ -271,6 +271,8 @@ def create_risk_ledger_entry(
     opportunity_id: str | None = None,
     evaluation: InvoiceEvaluation | None = None,
     entry_id: str | None = None,
+    source: str | None = None,
+    source_filename: str | None = None,
 ) -> RiskLedgerEntry:
     if evaluation is None:
         evaluation = evaluate(invoice)
@@ -285,5 +287,7 @@ def create_risk_ledger_entry(
         verification=evaluation.verification,
         risk=evaluation.risk,
         provenance=evaluation.provenance,
+        source=source,
+        source_filename=source_filename,
     )
 

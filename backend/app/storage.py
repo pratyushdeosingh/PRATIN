@@ -171,9 +171,21 @@ class Store:
         return [AuditEvent.model_validate_json(row[0]) for row in rows]
     def risk_ledger_entries(self) -> list[RiskLedgerEntry]:
         opps = self.opportunities()
+        audits = self.audits()
+        pdf_audit_map: dict[str, str] = {
+            a.opportunity_id: a.detail
+            for a in audits
+            if a.opportunity_id and a.event_type == "PDF_INVOICE_PARSED"
+        }
         entries: list[RiskLedgerEntry] = []
         for opp in opps:
             if opp.evaluation:
+                is_pdf = opp.id in pdf_audit_map
+                filename = None
+                if is_pdf:
+                    import re
+                    m = re.search(r'Parsed PDF ([^\s]+)', pdf_audit_map[opp.id])
+                    filename = m.group(1) if m else "invoice.pdf"
                 entries.append(
                     RiskLedgerEntry(
                         id="RSK-" + opp.id.removeprefix("OPP-"),
@@ -186,6 +198,8 @@ class Store:
                         verification=opp.evaluation.verification,
                         risk=opp.evaluation.risk,
                         provenance=opp.evaluation.provenance,
+                        source="PDF_UPLOAD" if is_pdf else "SCENARIO",
+                        source_filename=filename,
                     )
                 )
         return entries
