@@ -56,15 +56,22 @@ class PostgresStore:
 
     def save_opportunity(self, item: OpportunityRecord):
         with self.pool.connection() as db, db.transaction():
-            db.execute(
-                """insert into pratin.opportunities (id, created_at, status, payload)
+            result = db.execute(
+                """insert into pratin.opportunities as current (id, created_at, status, payload)
                    values (%s, %s, %s, %s::jsonb)
                    on conflict (id) do update set
                      created_at=excluded.created_at,
                      status=excluded.status,
-                     payload=excluded.payload""",
+                     payload=excluded.payload
+                   where current.status <> 'SETTLED'
+                      or excluded.status = 'SETTLED'""",
                 (item.id, item.created_at, item.status, _json(item)),
             )
+            if result.rowcount == 0:
+                raise ValueError("Settled opportunities cannot be overwritten by a stale market run")
+
+    def close(self):
+        self.pool.close()
 
     def get_opportunity(self, item_id: str) -> OpportunityRecord | None:
         with self.pool.connection() as db:
@@ -231,22 +238,39 @@ class PostgresStore:
         return [_validate(AuditEvent, row[0]) for row in rows]
 
     def risk_ledger_entries(self) -> list[RiskLedgerEntry]:
-        return [
-            RiskLedgerEntry(
-                id="RSK-" + opportunity.id.removeprefix("OPP-"),
-                opportunity_id=opportunity.id,
-                invoice_number=opportunity.invoice.invoice_number,
-                supplier_name=opportunity.invoice.supplier_name,
-                buyer_name=opportunity.invoice.buyer_name,
-                amount=opportunity.invoice.amount,
-                evaluated_at=opportunity.created_at,
-                verification=opportunity.evaluation.verification,
-                risk=opportunity.evaluation.risk,
-                provenance=opportunity.evaluation.provenance,
-            )
-            for opportunity in self.opportunities()
-            if opportunity.evaluation
-        ]
+        opps = self.opportunities()
+        audits = self.audits()
+        pdf_audit_map: dict[str, str] = {
+            a.opportunity_id: a.detail
+            for a in audits
+            if a.opportunity_id and a.event_type == "PDF_INVOICE_PARSED"
+        }
+        entries: list[RiskLedgerEntry] = []
+        for opportunity in opps:
+            if opportunity.evaluation:
+                is_pdf = opportunity.id in pdf_audit_map
+                filename = None
+                if is_pdf:
+                    import re
+                    m = re.search(r'Parsed PDF ([^\s]+)', pdf_audit_map[opportunity.id])
+                    filename = m.group(1) if m else "invoice.pdf"
+                entries.append(
+                    RiskLedgerEntry(
+                        id="RSK-" + opportunity.id.removeprefix("OPP-"),
+                        opportunity_id=opportunity.id,
+                        invoice_number=opportunity.invoice.invoice_number,
+                        supplier_name=opportunity.invoice.supplier_name,
+                        buyer_name=opportunity.invoice.buyer_name,
+                        amount=opportunity.invoice.amount,
+                        evaluated_at=opportunity.created_at,
+                        verification=opportunity.evaluation.verification,
+                        risk=opportunity.evaluation.risk,
+                        provenance=opportunity.evaluation.provenance,
+                        source="PDF_UPLOAD" if is_pdf else "SCENARIO",
+                        source_filename=filename,
+                    )
+                )
+        return entries
 
     def risk_ledger_entry(self, identifier: str) -> RiskLedgerEntry | None:
         return next(

@@ -1,5 +1,6 @@
 import {useEffect,useState} from 'react'
 import {Activity,BadgeCheck,Banknote,CircleDollarSign,Gauge,Landmark,Radar,ShieldCheck,Sparkles} from 'lucide-react'
+import {Provider} from './api'
 
 const money=(n:number|null|undefined)=>n===null||n===undefined?'—':new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(n)
 const pct=(n:number|null|undefined)=>n===null||n===undefined?'—':`${(n*100).toFixed(0)}%`
@@ -30,7 +31,7 @@ const sampleRequest={
  ],
 }
 
-export default function CapitalAgents(){
+export default function CapitalAgents({providers,error:providerError}:{providers:Provider[];error:string}){
  const [analyses,setAnalyses]=useState<Analysis[]>([])
  const [phase,setPhase]=useState<'idle'|'loading'|'ready'|'error'>('idle')
  const [error,setError]=useState('')
@@ -38,7 +39,11 @@ export default function CapitalAgents(){
  const run=async()=>{
   setError('');setPhase('loading')
   try{
-   const response=await fetch(`${base}/analysis`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(sampleRequest)})
+   const request={...sampleRequest,providers:providers.length?providers.map(provider=>{
+    const fallback=sampleRequest.providers.find(item=>item.id===provider.id)||sampleRequest.providers[0]
+    return {...fallback,...provider}
+   }):sampleRequest.providers}
+   const response=await fetch(`${base}/analysis`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)})
    const payload=await response.json().catch(()=>null)
    if(!response.ok)throw new Error(payload&&typeof payload==='object'&&'detail' in payload?String(payload.detail):`Agent request failed: ${response.status}`)
    if(!payload||!Array.isArray(payload.offers))throw new Error('Agent returned an unexpected payload')
@@ -53,7 +58,7 @@ export default function CapitalAgents(){
 
  return <main>
   <header><div><p className="eyebrow">CAPITAL PROVIDERS • AGENT STACK</p><h1>Capital <em>agents.</em></h1><p className="lede">Autonomous provider agents that evaluate invoices and compete under their own liquidity, risk and portfolio constraints. Each agent runs a deterministic pipeline: observe the opportunity, evaluate attractiveness, enforce hard constraints, decide, price, and explain.</p></div><button className="primary" onClick={run} disabled={phase==='loading'}>{phase==='loading'?<Activity className="spin"/>:<Sparkles/>}{phase==='loading'?'Agents are analysing…':'Re-run agent analysis'}</button></header>
-  {error&&<div className="error-banner" role="alert"><strong>Agent request failed.</strong> {error} <button onClick={run} disabled={phase==='loading'}>Retry</button></div>}
+  {(error||providerError)&&<div className="error-banner" role="alert"><strong>Agent request failed.</strong> {error||providerError} <button onClick={run} disabled={phase==='loading'}>Retry</button></div>}
 
   <section className="provenance" aria-label="Agent provenance"><div><small>CAPITAL MARKET AGENT</small><span className={phase==='ready'?'service':phase==='error'?'unavailable':'fixture'}>● {phase==='ready'?'SERVICE':phase==='error'?'UNAVAILABLE':'PENDING'}</span></div><div><small>MARKET REGIME</small><span>{analyses[0]?analyses[0].market.regime:'—'}</span></div><div><small>SOURCE</small><span>{analyses[0]?analyses[0].market.source:'—'}</span></div><p>{analyses[0]?analyses[0].market.description:'No agent analysis received yet.'}</p></section>
 
@@ -81,5 +86,5 @@ function AgentCard({analysis}:{analysis:Analysis}){
    <div className="agent-block"><div className="eyebrow">REASONS</div><ul>{o.reasons.map(reason=><li key={reason}>{reason}</li>)}</ul></div>
    <div className="agent-block"><div className="eyebrow">PROVIDER STATE</div><div className="term-grid"><span>Available liquidity</span><b>{money(p.available_liquidity)}</b><span>Current exposure</span><b>{money(p.current_exposure)}</b><span>Portfolio capacity</span><b>{money(p.portfolio_capacity)}</b><span>Risk appetite</span><b>{p.risk_appetite}/100</b><span>Max ticket</span><b>{money(p.max_ticket_size)}</b><span>Settlement speed</span><b>{p.settlement_hours}h</b></div></div>
   </details>
- </article>
+</article>
 }

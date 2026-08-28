@@ -1,9 +1,11 @@
+from contextlib import asynccontextmanager
 from uuid import uuid4
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from contracts.models import (AuditEvent, InvoiceEvaluationRequest, MarketRequest, OpportunityCreate,
-    OpportunityRecord, PlatformMetrics, Provider, RiskLedgerEntry, Settlement, utc_now)
+from contracts.models import (AuditEvent, FinancingRequirements, InvoiceEvaluationRequest, InvoiceParseResponse,
+    MarketRequest, OpportunityCreate, OpportunityRecord, PlatformMetrics, Provider, RiskLedgerEntry, Settlement, utc_now)
 from .config import Settings
 from .fixtures import scenarios
 from .matching import rank_offers
@@ -11,7 +13,15 @@ from .services import IntegrationClient
 from .store_factory import create_store
 
 settings = Settings(); store = create_store(settings); integrations = IntegrationClient(settings)
-app = FastAPI(title="PRATIN Capital Allocation Engine", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    close = getattr(store, "close", None)
+    if close:
+        close()
+
+app = FastAPI(title="PRATIN Capital Allocation Engine", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -30,6 +40,46 @@ def create_opportunity(request: OpportunityCreate):
         invoice=request.invoice, requirements=request.requirements)
     store.save_opportunity(item); store.audit("OPPORTUNITY_CREATED", f"Invoice {request.invoice.invoice_number} entered the market.", item.id)
     return item
+
+@app.post("/api/invoices/parse-pdf", response_model=InvoiceParseResponse)
+async def upload_and_parse_invoice_pdf(file: UploadFile = File(...)):
+    if not file.filename or not (file.filename.lower().endswith(".pdf") or file.content_type == "application/pdf"):
+        raise HTTPException(400, "Only PDF files are supported.")
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(413, "PDF exceeds maximum allowed size of 10MB.")
+    try:
+        parsed_resp, status = await integrations.parse_invoice_pdf(pdf_bytes, filename=file.filename or "invoice.pdf")
+    except Exception as exc:
+        raise HTTPException(503, f"Invoice risk service unavailable: {exc}") from exc
+    if parsed_resp.status in ("PDF_EMPTY", "PDF_INVALID"):
+        raise HTTPException(400, parsed_resp.error_detail or parsed_resp.status)
+    if parsed_resp.status == "PDF_TEXT_UNREADABLE":
+        return JSONResponse(status_code=422, content=parsed_resp.model_dump(mode="json"))
+
+    if parsed_resp.invoice and parsed_resp.evaluation:
+        opp_id = "OPP-" + uuid4().hex[:10].upper()
+        reqs = FinancingRequirements(
+            minimum_amount=round(parsed_resp.invoice.amount * 0.8, 0),
+            max_settlement_hours=48,
+            desired_tenor_days=60,
+        )
+        item = OpportunityRecord(
+            id=opp_id,
+            created_at=utc_now(),
+            status="CREATED",
+            invoice=parsed_resp.invoice,
+            requirements=reqs,
+            evaluation=parsed_resp.evaluation,
+            integration_status={"invoice_risk": status, "capital_market": "UNAVAILABLE"},
+        )
+        store.save_opportunity(item)
+        if parsed_resp.extracted_fields:
+            store.audit("PDF_INVOICE_PARSED", f"Parsed PDF {file.filename} (Confidence: {parsed_resp.extracted_fields.extraction_confidence.value}) for invoice {parsed_resp.invoice.invoice_number}.", opp_id)
+        store.audit("RISK_EVALUATED", f"PDF invoice {parsed_resp.invoice.invoice_number} evaluated with {parsed_resp.evaluation.risk.band.value} risk ({parsed_resp.evaluation.risk.score}/100).", opp_id)
+        if parsed_resp.ledger_entry:
+            parsed_resp.ledger_entry = parsed_resp.ledger_entry.model_copy(update={"opportunity_id": opp_id})
+    return parsed_resp
 
 @app.get("/api/opportunities", response_model=list[OpportunityRecord])
 def list_opportunities(): return store.opportunities()
@@ -55,7 +105,10 @@ async def clear_market(item_id: str) -> OpportunityRecord:
                            {provider.id: provider.available_liquidity for provider in providers})
     item = item.model_copy(update={"status": "MARKET_RUN", "evaluation": evaluation, "offers": market.offers,
         "match": decision, "integration_status": {"invoice_risk": risk_status, "capital_market": market_status}})
-    store.save_opportunity(item)
+    try:
+        store.save_opportunity(item)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     store.audit("RISK_EVALUATED", f"Invoice {item.invoice.invoice_number} verified ({evaluation.verification.status.value}) with {evaluation.risk.band.value} risk score {evaluation.risk.score}/100.", item.id)
     store.audit("MARKET_CLEARED", f"{len(market.offers)} providers evaluated; recommendation {decision.recommended_offer_id or 'none'}.", item.id)
     return item

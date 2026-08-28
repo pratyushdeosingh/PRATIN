@@ -50,11 +50,13 @@ def test_valid_invoice_produces_persistent_risk_ledger_entry():
 
     # Factor-level explainability check
     assert len(entry["risk"]["factors"]) >= 3
+    assert len(entry["verification"]["reason_codes"]) > 0
     for factor in entry["risk"]["factors"]:
         assert factor["label"]
         assert factor["impact"] in ["positive", "negative", "neutral"]
         assert factor["explanation"]
         assert isinstance(factor["points"], (int, float))
+        assert factor["reason_code"] is not None
 
     # Single entry endpoint by opportunity_id and by entry id
     by_opp = client.get(f"/api/risk-ledger/{opp_id}")
