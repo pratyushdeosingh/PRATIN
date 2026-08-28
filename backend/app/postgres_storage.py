@@ -4,7 +4,16 @@ from uuid import uuid4
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
 
-from contracts.models import AuditEvent, OpportunityRecord, Provider, RiskLedgerEntry, Settlement, utc_now
+from contracts.models import (
+    AuditEvent,
+    Invoice,
+    OpportunityRecord,
+    PersistedInvoice,
+    Provider,
+    RiskLedgerEntry,
+    Settlement,
+    utc_now,
+)
 from .fixtures import providers as fixture_providers
 
 
@@ -51,8 +60,88 @@ class PostgresStore:
             db.execute("delete from pratin.audit_events")
             db.execute("delete from pratin.settlements")
             db.execute("delete from pratin.opportunities")
+            db.execute("delete from pratin.invoices")
             db.execute("delete from pratin.providers")
             self._insert_fixture_providers(db)
+
+    # ------------------------------------------------------------------
+    # Parsed invoice persistence (parser remains the source of truth)
+    # ------------------------------------------------------------------
+
+    def save_invoice(self, invoice: Invoice) -> PersistedInvoice:
+        """Upsert a parsed invoice keyed by invoice number.
+
+        Re-parsing the same invoice updates the existing record instead of
+        duplicating it, and bumps ``updated_at``.
+        """
+        now = utc_now()
+        record = PersistedInvoice(
+            id="INV-" + uuid4().hex[:10].upper(),
+            invoice_number=invoice.invoice_number,
+            supplier_name=invoice.supplier_name,
+            buyer_name=invoice.buyer_name,
+            amount=invoice.amount,
+            currency=invoice.currency,
+            issue_date=invoice.issue_date,
+            due_date=invoice.due_date,
+            industry=invoice.industry,
+            gstin=invoice.gstin,
+            purchase_order_reference=invoice.purchase_order_reference,
+            supplier_history_months=invoice.supplier_history_months,
+            buyer_rating=invoice.buyer_rating,
+            on_time_payment_ratio=invoice.on_time_payment_ratio,
+            prior_defaults=invoice.prior_defaults,
+            status="PARSED",
+            raw_parsed=invoice.model_dump(mode="json"),
+            created_at=now,
+            updated_at=now,
+        )
+        with self.pool.connection() as db, db.transaction():
+            existing = db.execute(
+                "select payload from pratin.invoices where invoice_number=%s",
+                (invoice.invoice_number,),
+            ).fetchone()
+            if existing:
+                current = _validate(PersistedInvoice, existing[0])
+                record = record.model_copy(update={
+                    "id": current.id,
+                    "created_at": current.created_at,
+                    "updated_at": now,
+                })
+                db.execute(
+                    "update pratin.invoices set status=%s, updated_at=%s, payload=%s::jsonb where id=%s",
+                    (record.status, record.updated_at, _json(record), record.id),
+                )
+            else:
+                db.execute(
+                    """insert into pratin.invoices
+                       (id, invoice_number, status, created_at, updated_at, payload)
+                       values (%s, %s, %s, %s, %s, %s::jsonb)""",
+                    (
+                        record.id,
+                        record.invoice_number,
+                        record.status,
+                        record.created_at,
+                        record.updated_at,
+                        _json(record),
+                    ),
+                )
+        return record
+
+    def get_invoice(self, invoice_number: str) -> PersistedInvoice | None:
+        with self.pool.connection() as db:
+            row = db.execute(
+                "select payload from pratin.invoices where invoice_number=%s",
+                (invoice_number,),
+            ).fetchone()
+        return _validate(PersistedInvoice, row[0]) if row else None
+
+    def invoices(self) -> list[PersistedInvoice]:
+        with self.pool.connection() as db:
+            rows = db.execute(
+                "select payload from pratin.invoices order by created_at desc, id desc"
+            ).fetchall()
+        return [_validate(PersistedInvoice, row[0]) for row in rows]
 
     def save_opportunity(self, item: OpportunityRecord):
         with self.pool.connection() as db, db.transaction():

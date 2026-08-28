@@ -24,7 +24,7 @@ def test_committed_supabase_schema_is_private_and_lock_ready():
     ).read().lower()
     postgres_store = open("backend/app/postgres_storage.py", encoding="utf-8").read().lower()
     assert "revoke all on schema pratin from public, anon, authenticated" in migration
-    assert migration.count("enable row level security") == 4
+    assert migration.count("enable row level security") == 5
     assert "opportunity_id text not null unique" in migration
     assert postgres_store.count("for update") >= 2
     assert "db.transaction()" in postgres_store

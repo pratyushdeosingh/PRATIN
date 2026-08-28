@@ -102,10 +102,31 @@ async def upload_and_parse_invoice_pdf(file: UploadFile = File(...)):
         store.audit("RISK_EVALUATED", f"PDF invoice {parsed_resp.invoice.invoice_number} evaluated with {parsed_resp.evaluation.risk.band.value} risk ({parsed_resp.evaluation.risk.score}/100).", opp_id)
         if parsed_resp.ledger_entry:
             parsed_resp.ledger_entry = parsed_resp.ledger_entry.model_copy(update={"opportunity_id": opp_id})
+        # Persist the parsed invoice so it survives backend restarts. The
+        # parser remains the source of truth; the database only stores the
+        # parsed outcome.
+        try:
+            persisted = store.save_invoice(parsed_resp.invoice)
+            parsed_resp = parsed_resp.model_copy(update={"persisted_invoice": persisted})
+        except Exception:
+            store.audit("INVOICE_PERSISTENCE_FAILED",
+                        f"Parsed invoice {parsed_resp.invoice.invoice_number} could not be persisted to {store.backend}.",
+                        opp_id)
     return parsed_resp
 
 @app.get("/api/opportunities", response_model=list[OpportunityRecord])
 def list_opportunities(): return store.opportunities()
+
+@app.get("/api/invoices", response_model=list)
+def list_persisted_invoices():
+    """Durable parsed-invoice records, surviving backend restarts."""
+    return [invoice.model_dump(mode="json") for invoice in store.invoices()]
+
+@app.get("/api/invoices/{invoice_number}")
+def get_persisted_invoice(invoice_number: str):
+    invoice = store.get_invoice(invoice_number)
+    if not invoice: raise HTTPException(404, "Persisted invoice not found")
+    return invoice
 
 @app.get("/api/opportunities/{item_id}", response_model=OpportunityRecord)
 def get_opportunity(item_id: str):

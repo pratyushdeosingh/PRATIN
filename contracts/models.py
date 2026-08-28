@@ -211,7 +211,36 @@ class InvoiceParseResponse(StrictModel):
     invoice: Invoice | None = None
     evaluation: InvoiceEvaluation | None = None
     ledger_entry: RiskLedgerEntry | None = None
+    persisted_invoice: "PersistedInvoice | None" = None
     error_detail: str | None = None
+
+
+class PersistedInvoice(StrictModel):
+    """Durable database record of a parsed invoice.
+
+    The parser stays the source of truth for extraction; this model only
+    stores the parsed outcome so invoices survive backend restarts.
+    """
+
+    id: str
+    invoice_number: str | None = None
+    supplier_name: str | None = None
+    buyer_name: str | None = None
+    amount: float | None = Field(default=None, gt=0)
+    currency: Literal["INR"] = "INR"
+    issue_date: date | None = None
+    due_date: date | None = None
+    industry: str | None = None
+    gstin: str | None = None
+    purchase_order_reference: str | None = None
+    supplier_history_months: int | None = Field(default=None, ge=0)
+    buyer_rating: float | None = Field(default=None, ge=0, le=1)
+    on_time_payment_ratio: float | None = Field(default=None, ge=0, le=1)
+    prior_defaults: int | None = Field(default=None, ge=0)
+    status: Literal["PARSED", "PARTIAL", "SETTLED"] = "PARSED"
+    raw_parsed: dict = {}
+    created_at: datetime
+    updated_at: datetime
 
 
 class InvoiceEvaluationRequest(StrictModel):

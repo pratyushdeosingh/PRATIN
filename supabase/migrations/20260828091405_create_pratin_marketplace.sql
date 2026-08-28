@@ -32,6 +32,20 @@ create table if not exists pratin.audit_events (
   payload jsonb not null
 );
 
+create table if not exists pratin.invoices (
+  id text primary key,
+  invoice_number text,
+  status text not null check (status in ('PARSED', 'PARTIAL', 'SETTLED')),
+  created_at timestamptz not null,
+  updated_at timestamptz not null,
+  payload jsonb not null
+);
+
+create index if not exists invoices_invoice_number_idx
+  on pratin.invoices (invoice_number);
+create index if not exists invoices_created_at_idx
+  on pratin.invoices (created_at desc);
+
 create index if not exists opportunities_status_created_idx
   on pratin.opportunities (status, created_at desc);
 create index if not exists settlements_provider_settled_idx
@@ -45,6 +59,7 @@ alter table pratin.opportunities enable row level security;
 alter table pratin.providers enable row level security;
 alter table pratin.settlements enable row level security;
 alter table pratin.audit_events enable row level security;
+alter table pratin.invoices enable row level security;
 
 revoke all on all tables in schema pratin from public, anon, authenticated;
 grant select, insert, update, delete on all tables in schema pratin to service_role;

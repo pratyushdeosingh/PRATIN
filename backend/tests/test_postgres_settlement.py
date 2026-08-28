@@ -50,7 +50,7 @@ def test_postgres_schema_keeps_browser_roles_out(store):
                join pg_namespace n on n.oid=c.relnamespace
                where n.nspname='pratin' and c.relkind='r' and c.relrowsecurity"""
         ).fetchone()[0]
-        assert rls_tables == 4
+        assert rls_tables == 5
 
 
 def test_postgres_duplicate_acceptance_mutates_and_audits_once(store):

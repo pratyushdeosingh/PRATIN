@@ -51,10 +51,8 @@ jobs:
 
           with psycopg.connect(os.environ["SUPABASE_DATABASE_URL"], autocommit=True) as connection:
               connection.execute("create role anon; create role authenticated; create role service_role;")
-              connection.execute(
-                  Path("supabase/migrations/20260828091405_create_pratin_marketplace.sql").read_text(),
-                  prepare=False,
-              )
+              for migration in sorted(Path("supabase/migrations").glob("*.sql")):
+                  connection.execute(migration.read_text(), prepare=False)
           PY
       - name: Prove required-mode service orchestration and reallocation
         shell: bash

@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
-from contracts.models import AuditEvent, OpportunityRecord, Provider, RiskLedgerEntry, Settlement, utc_now
+from contracts.models import AuditEvent, OpportunityRecord, PersistedInvoice, Provider, RiskLedgerEntry, Settlement, utc_now
 from .fixtures import providers as fixture_providers
 
 class Store:
@@ -39,14 +39,76 @@ class Store:
             CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settlements (id TEXT PRIMARY KEY, opportunity_id TEXT UNIQUE, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS audit (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, invoice_number TEXT UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, payload TEXT NOT NULL);
             """)
             if not db.execute("SELECT 1 FROM providers LIMIT 1").fetchone():
                 db.executemany("INSERT INTO providers VALUES (?, ?)", [(p.id, p.model_dump_json()) for p in fixture_providers()])
 
     def reset(self):
         with self.lock, self.connect() as db:
-            db.execute("DELETE FROM opportunities"); db.execute("DELETE FROM settlements"); db.execute("DELETE FROM audit"); db.execute("DELETE FROM providers")
+            db.execute("DELETE FROM opportunities"); db.execute("DELETE FROM settlements"); db.execute("DELETE FROM audit"); db.execute("DELETE FROM invoices"); db.execute("DELETE FROM providers")
             db.executemany("INSERT INTO providers VALUES (?, ?)", [(p.id, p.model_dump_json()) for p in fixture_providers()])
+
+    # ------------------------------------------------------------------
+    # Parsed invoice persistence (parser remains the source of truth)
+    # ------------------------------------------------------------------
+
+    def save_invoice(self, invoice) -> PersistedInvoice:
+        """Upsert a parsed invoice keyed by invoice number."""
+        now = utc_now()
+        record = PersistedInvoice(
+            id="INV-" + uuid4().hex[:10].upper(),
+            invoice_number=invoice.invoice_number,
+            supplier_name=invoice.supplier_name,
+            buyer_name=invoice.buyer_name,
+            amount=invoice.amount,
+            currency=invoice.currency,
+            issue_date=invoice.issue_date,
+            due_date=invoice.due_date,
+            industry=invoice.industry,
+            gstin=invoice.gstin,
+            purchase_order_reference=invoice.purchase_order_reference,
+            supplier_history_months=invoice.supplier_history_months,
+            buyer_rating=invoice.buyer_rating,
+            on_time_payment_ratio=invoice.on_time_payment_ratio,
+            prior_defaults=invoice.prior_defaults,
+            status="PARSED",
+            raw_parsed=invoice.model_dump(mode="json"),
+            created_at=now,
+            updated_at=now,
+        )
+        with self.lock, self.connect() as db:
+            existing = db.execute(
+                "SELECT payload FROM invoices WHERE invoice_number=?", (invoice.invoice_number,)
+            ).fetchone()
+            if existing:
+                current = PersistedInvoice.model_validate_json(existing[0])
+                record = record.model_copy(update={
+                    "id": current.id,
+                    "created_at": current.created_at,
+                    "updated_at": now,
+                })
+                db.execute(
+                    "UPDATE invoices SET updated_at=?, payload=? WHERE id=?",
+                    (record.updated_at.isoformat(), record.model_dump_json(), record.id),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO invoices (id, invoice_number, created_at, updated_at, payload) VALUES (?, ?, ?, ?, ?)",
+                    (record.id, record.invoice_number, record.created_at.isoformat(),
+                     record.updated_at.isoformat(), record.model_dump_json()),
+                )
+        return record
+
+    def get_invoice(self, invoice_number: str) -> PersistedInvoice | None:
+        with self.connect() as db:
+            row = db.execute("SELECT payload FROM invoices WHERE invoice_number=?", (invoice_number,)).fetchone()
+        return PersistedInvoice.model_validate_json(row[0]) if row else None
+
+    def invoices(self) -> list[PersistedInvoice]:
+        with self.connect() as db:
+            rows = db.execute("SELECT payload FROM invoices ORDER BY created_at DESC").fetchall()
+        return [PersistedInvoice.model_validate_json(row[0]) for row in rows]
 
     def save_opportunity(self, item: OpportunityRecord):
         with self.lock, self.connect() as db:
