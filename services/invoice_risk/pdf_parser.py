@@ -246,6 +246,19 @@ def parse_extracted_text(text: str) -> ExtractedInvoiceFields:
             except ValueError:
                 pass
 
+    # 11. Supplier State
+    supplier_state: str | None = None
+    state_patterns = [
+        r'(?i)(?:supplier\s*state|place\s*of\s*supply|state)\s*[:\-\s]\s*([A-Za-z\s]+)',
+    ]
+    for p in state_patterns:
+        match = re.search(p, text)
+        if match:
+            cand = match.group(1).strip()
+            if cand:
+                supplier_state = cand.split("\n")[0].strip()
+                break
+
     # Compute missing fields & extraction confidence
     missing_fields: list[str] = []
     if not invoice_number:
@@ -287,6 +300,7 @@ def parse_extracted_text(text: str) -> ExtractedInvoiceFields:
         payment_terms=payment_terms,
         subtotal=subtotal,
         tax_amount=tax_amount,
+        supplier_state=supplier_state,
         missing_fields=missing_fields,
         warnings=warnings,
         extraction_confidence=confidence,
@@ -340,6 +354,7 @@ def parse_and_evaluate_pdf(
                 purchase_order_reference=extracted.purchase_order_reference,
                 subtotal=extracted.subtotal,
                 tax_amount=extracted.tax_amount,
+                supplier_state=extracted.supplier_state,
                 buyer_rating=0.75,
                 supplier_history_months=24,
                 on_time_payment_ratio=0.86,

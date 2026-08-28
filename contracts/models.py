@@ -39,6 +39,7 @@ class Invoice(StrictModel):
     purchase_order_reference: str | None = None
     subtotal: float | None = None
     tax_amount: float | None = None
+    supplier_state: str | None = None
     buyer_rating: float = Field(default=0.75, ge=0, le=1)
     supplier_history_months: int = Field(default=24, ge=0)
     on_time_payment_ratio: float = Field(default=0.86, ge=0, le=1)
@@ -82,6 +83,20 @@ class DuplicateCheckResult(StrictModel):
     reasons: list[str] = []
 
 
+class GSTINCheckResult(StrictModel):
+    is_valid_format: bool = True
+    gstin: str | None = None
+    state_code: str | None = None
+    state_name: str | None = None
+    supplier_state: str | None = None
+    state_match: bool | None = None
+    pan_entity_code: str | None = None
+    pan_entity_type: str | None = None
+    supplier_entity_inferred: str | None = None
+    entity_match: bool | None = None
+    warnings: list[str] = []
+
+
 class VerificationResult(StrictModel):
     status: VerificationStatus
     confidence: float = Field(ge=0, le=1)
@@ -90,6 +105,7 @@ class VerificationResult(StrictModel):
     reasons: list[str]
     reason_codes: list[str] = []
     duplicate_check: DuplicateCheckResult | None = None
+    gstin_check: GSTINCheckResult | None = None
     consistency_warnings: list[str] = []
     simulation_notice: str = "Synthetic rule-based verification; not a banking, GST, KYC, or legal verification."
 
@@ -130,6 +146,7 @@ class ExtractedInvoiceFields(StrictModel):
     payment_terms: str | None = None
     subtotal: float | None = None
     tax_amount: float | None = None
+    supplier_state: str | None = None
     missing_fields: list[str] = []
     warnings: list[str] = []
     extraction_confidence: ExtractionConfidence = ExtractionConfidence.LOW
