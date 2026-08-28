@@ -58,7 +58,22 @@ export default function App(){
   try{
    await api.reset()
    const scenarios=await api.scenarios()
-   const created=await api.create(scenarios.urgent)
+   let created: Opportunity | null = null
+   if(scenarios && scenarios.urgent){
+    created=await api.create(scenarios.urgent)
+   }else{
+    const opps=await api.opportunities()
+    if(opps.length>0){
+     created=opps[0]
+    }
+   }
+   if(!created){
+    await refresh()
+    setPhase('idle')
+    setView('risk-ledger')
+    setError('No sample scenario loaded. Upload a PDF invoice in Invoice & Risk to evaluate and match.')
+    return
+   }
    const result=await api.run(created.id)
    setOpportunity(result)
    if(result.requirements){
@@ -78,7 +93,17 @@ export default function App(){
    if(!targetOpp){
     await api.reset()
     const scenarios=await api.scenarios()
-    targetOpp=await api.create(scenarios.urgent)
+    if(scenarios && scenarios.urgent){
+     targetOpp=await api.create(scenarios.urgent)
+    }else{
+     const opps=await api.opportunities()
+     if(opps.length>0){
+      targetOpp=opps[0]
+     }else{
+      setView('risk-ledger')
+      throw new Error('No active invoice to match. Please upload a PDF invoice first.')
+     }
+    }
    }
    const updatedReqs={
     minimum_amount:amt??reqAmount,
@@ -439,17 +464,33 @@ function RiskEntryCard({entry,onMatchOpportunity}:{entry:RiskLedgerEntry;onMatch
    {/* 2. FACTOR-LEVEL EXPLAINABILITY */}
    <div className="eyebrow">ALL FACTOR-LEVEL EXPLAINABILITY ({entry.risk.factors.length} FACTORS)</div>
    <div className="ledger-factors">
-    {entry.risk.factors.map(factor=>(
-     <div key={factor.label} className={`factor-card ${factor.impact}`}>
+    {entry.risk.factors.map((factor, idx)=>(
+     <div key={`${factor.label}-${idx}`} className={`factor-card ${factor.impact}`}>
       <div className="factor-title">
        <span>{factor.label}</span>
        <b>{factor.points>0?`+${factor.points}`:factor.points}</b>
       </div>
-      {factor.reason_code&&(
-       <div style={{fontSize:9,fontWeight:700,letterSpacing:'0.04em',color:factor.impact==='positive'?'#2e6935':factor.impact==='negative'?'#8c3f35':'#526c63',marginBottom:4}}>
-        {factor.reason_code}
-       </div>
-      )}
+      <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap',marginBottom:6}}>
+       {factor.source_category&&(
+        <span style={{
+         fontSize:8,
+         fontWeight:800,
+         letterSpacing:'0.05em',
+         padding:'2px 5px',
+         borderRadius:3,
+         background:factor.source_category==='HISTORICAL_COUNTERPARTY'?'#eef3f8':factor.source_category==='INVOICE_DERIVED'?'#edf8ee':factor.source_category==='VERIFICATION_CHECK'?'#fbf3e8':'#f0f2f1',
+         color:factor.source_category==='HISTORICAL_COUNTERPARTY'?'#1d4ed8':factor.source_category==='INVOICE_DERIVED'?'#2e6935':factor.source_category==='VERIFICATION_CHECK'?'#b45309':'#475569',
+         border:'1px solid currentColor'
+        }}>
+         {factor.source_category==='HISTORICAL_COUNTERPARTY'?'📊 HISTORICAL PROFILE':factor.source_category==='INVOICE_DERIVED'?'📄 INVOICE-DERIVED':factor.source_category==='VERIFICATION_CHECK'?'🛡️ VERIFICATION CHECK':'⚖️ POLICY RULE'}
+        </span>
+       )}
+       {factor.reason_code&&(
+        <span style={{fontSize:9,fontWeight:700,letterSpacing:'0.04em',color:factor.impact==='positive'?'#2e6935':factor.impact==='negative'?'#8c3f35':'#526c63'}}>
+         {factor.reason_code}
+        </span>
+       )}
+      </div>
       <p className="factor-desc">{factor.explanation}</p>
      </div>
     ))}

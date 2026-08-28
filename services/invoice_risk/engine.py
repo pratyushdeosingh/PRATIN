@@ -3,6 +3,7 @@ from datetime import date
 from uuid import uuid4
 
 from contracts.models import (
+    CounterpartyHistoricalProfile,
     DuplicateCheckResult,
     GSTINCheckResult,
     Invoice,
@@ -11,6 +12,7 @@ from contracts.models import (
     RiskBand,
     RiskDecisionSummary,
     RiskFactor,
+    RiskFactorSource,
     RiskLedgerEntry,
     RiskSimulationRequest,
     RiskSimulationResult,
@@ -424,11 +426,121 @@ def verify_invoice(invoice: Invoice, existing_invoices: list[Invoice] | None = N
     )
 
 
-def assess_risk(invoice: Invoice, verification: VerificationResult) -> RiskAssessment:
-    factors: list[RiskFactor] = []
-    score = 38.0
+KNOWN_COUNTERPARTY_PROFILES: dict[str, dict] = {
+    # Buyer profiles (historical repayment records)
+    "orion auto systems": {"buyer_rating": 0.88, "on_time_payment_ratio": 0.93, "prior_defaults": 0},
+    "aster healthcare": {"buyer_rating": 0.94, "on_time_payment_ratio": 0.96, "prior_defaults": 0},
+    "zenith automotive ltd": {"buyer_rating": 0.85, "on_time_payment_ratio": 0.92, "prior_defaults": 0},
+    "beta motors": {"buyer_rating": 0.80, "on_time_payment_ratio": 0.88, "prior_defaults": 0},
+    "urban cart": {"buyer_rating": 0.42, "on_time_payment_ratio": 0.61, "prior_defaults": 1},
+    # Supplier profiles (historical supplier operating records)
+    "shakti components": {"supplier_history_months": 38},
+    "nova pharma pack": {"supplier_history_months": 38},
+    "apex precision engineering pvt ltd": {"supplier_history_months": 36},
+    "alpha engineering": {"supplier_history_months": 24},
+    "rapid retail works": {"supplier_history_months": 9},
+}
 
-    def factor(label: str, points: float, explanation: str, reason_code: str):
+
+def resolve_counterparty_profile(
+    invoice: Invoice,
+    existing_invoices: list[Invoice] | None = None,
+) -> CounterpartyHistoricalProfile:
+    """
+    Resolve historical counterparty metrics deterministically.
+    1. If explicit counterparty_profile attached, use it.
+    2. If explicit profile fields set on invoice, use them.
+    3. If historical invoices exist in store, calculate deterministically from store records.
+    4. If matched in known counterparty registry, use registry records.
+    5. Otherwise, return UNAVAILABLE with None fields (no fake values).
+    """
+    if invoice.counterparty_profile is not None:
+        return invoice.counterparty_profile
+
+    has_explicit = any(
+        v is not None
+        for v in (invoice.buyer_rating, invoice.on_time_payment_ratio, invoice.supplier_history_months, invoice.prior_defaults)
+    )
+    if has_explicit:
+        return CounterpartyHistoricalProfile(
+            buyer_rating=invoice.buyer_rating,
+            on_time_payment_ratio=invoice.on_time_payment_ratio,
+            supplier_history_months=invoice.supplier_history_months,
+            prior_defaults=invoice.prior_defaults if invoice.prior_defaults is not None else 0,
+            source="SEEDED_REGISTRY",
+            provenance_detail="Explicit historical profile supplied on invoice input",
+        )
+
+    b_norm = invoice.buyer_name.strip().lower()
+    s_norm = invoice.supplier_name.strip().lower()
+    store_buyer_invoices = [inv for inv in (existing_invoices or []) if inv.buyer_name.strip().lower() == b_norm]
+    store_supplier_invoices = [inv for inv in (existing_invoices or []) if inv.supplier_name.strip().lower() == s_norm]
+
+    calc_buyer_rating: float | None = None
+    calc_on_time_ratio: float | None = None
+    calc_supplier_months: int | None = None
+    calc_prior_defaults: int | None = None
+    source = "UNAVAILABLE"
+    provenance = "No historical counterparty records found"
+
+    if store_buyer_invoices or store_supplier_invoices:
+        source = "STORE_DERIVED"
+        provenance = f"Calculated from {len(store_buyer_invoices)} buyer and {len(store_supplier_invoices)} supplier historical records in store"
+        if store_buyer_invoices:
+            ratings = [inv.buyer_rating for inv in store_buyer_invoices if inv.buyer_rating is not None]
+            calc_buyer_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
+            ratios = [inv.on_time_payment_ratio for inv in store_buyer_invoices if inv.on_time_payment_ratio is not None]
+            calc_on_time_ratio = round(sum(ratios) / len(ratios), 2) if ratios else None
+            defaults = [inv.prior_defaults for inv in store_buyer_invoices if inv.prior_defaults is not None]
+            calc_prior_defaults = max(defaults) if defaults else 0
+
+        if store_supplier_invoices:
+            hist_months = [inv.supplier_history_months for inv in store_supplier_invoices if inv.supplier_history_months is not None]
+            calc_supplier_months = max(hist_months) if hist_months else None
+
+    if calc_buyer_rating is None and b_norm in KNOWN_COUNTERPARTY_PROFILES:
+        b_data = KNOWN_COUNTERPARTY_PROFILES[b_norm]
+        calc_buyer_rating = b_data.get("buyer_rating")
+        calc_on_time_ratio = b_data.get("on_time_payment_ratio")
+        calc_prior_defaults = b_data.get("prior_defaults", 0)
+        source = "SEEDED_REGISTRY"
+        provenance = f"Matched historical counterparty record for buyer '{invoice.buyer_name}'"
+
+    if calc_supplier_months is None and s_norm in KNOWN_COUNTERPARTY_PROFILES:
+        s_data = KNOWN_COUNTERPARTY_PROFILES[s_norm]
+        calc_supplier_months = s_data.get("supplier_history_months")
+        if source == "UNAVAILABLE":
+            source = "SEEDED_REGISTRY"
+            provenance = f"Matched supplier profile for '{invoice.supplier_name}'"
+
+    return CounterpartyHistoricalProfile(
+        buyer_rating=calc_buyer_rating,
+        on_time_payment_ratio=calc_on_time_ratio,
+        supplier_history_months=calc_supplier_months,
+        prior_defaults=calc_prior_defaults,
+        source=source,
+        provenance_detail=provenance,
+    )
+
+
+def assess_risk(
+    invoice: Invoice,
+    verification: VerificationResult,
+    existing_invoices: list[Invoice] | None = None,
+) -> RiskAssessment:
+    factors: list[RiskFactor] = []
+    missing_info: list[str] = list(verification.uncertain_fields)
+    score = RISK_POLICY_WEIGHTS["BASE_SCORE"]
+
+    profile = invoice.counterparty_profile or resolve_counterparty_profile(invoice, existing_invoices)
+
+    def factor(
+        label: str,
+        points: float,
+        explanation: str,
+        reason_code: str,
+        source_category: RiskFactorSource = RiskFactorSource.POLICY_RULE,
+    ):
         nonlocal score
         score += points
         impact = "negative" if points > 0 else "positive" if points < 0 else "neutral"
@@ -438,94 +550,138 @@ def assess_risk(invoice: Invoice, verification: VerificationResult) -> RiskAsses
             impact=impact,
             explanation=explanation,
             reason_code=reason_code,
+            source_category=source_category,
         ))
 
-    # 1. Buyer reliability (continuous)
-    buyer_pts = -18.0 * invoice.buyer_rating
-    buyer_code = "BUYER_RELIABILITY_STRONG" if invoice.buyer_rating >= 0.75 else "BUYER_RELIABILITY_WEAK"
-    factor(
-        "Buyer reliability",
-        buyer_pts,
-        f"Buyer reliability signal is {invoice.buyer_rating:.0%}.",
-        buyer_code,
-    )
-
-    # 2. Payment history (graduated)
-    r = invoice.on_time_payment_ratio
-    if r >= 0.95:
-        factor("Payment history", -15.0, f"Exceptional on-time payment ratio of {r:.0%}.", "PAYMENT_HISTORY_STRONG")
-    elif r >= 0.90:
-        factor("Payment history", -10.0, f"Strong on-time payment ratio of {r:.0%}.", "PAYMENT_HISTORY_STRONG")
-    elif r >= 0.85:
-        factor("Payment history", -5.0, f"Acceptable on-time payment ratio of {r:.0%}.", "PAYMENT_HISTORY_STRONG")
-    elif r >= 0.70:
-        factor("Payment history", 5.0, f"On-time payment ratio of {r:.0%} shows moderate payment delays.", "PAYMENT_HISTORY_WEAK")
-    elif r >= 0.50:
-        factor("Payment history", 12.0, f"On-time payment ratio of {r:.0%} increases payment risk.", "PAYMENT_HISTORY_WEAK")
+    # 1. Buyer reliability (historical counterparty data)
+    b_rating = invoice.buyer_rating if invoice.buyer_rating is not None else profile.buyer_rating
+    if b_rating is not None:
+        buyer_pts = RISK_POLICY_WEIGHTS["BUYER_RATING_MULTIPLIER"] * b_rating
+        buyer_code = "BUYER_RELIABILITY_STRONG" if b_rating >= 0.75 else "BUYER_RELIABILITY_WEAK"
+        factor(
+            "Buyer reliability",
+            buyer_pts,
+            f"Buyer reliability signal is {b_rating:.0%} based on historical counterparty data.",
+            buyer_code,
+            source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY,
+        )
     else:
-        factor("Payment history", 20.0, f"On-time payment ratio of {r:.0%} reflects critical delinquency.", "PAYMENT_HISTORY_CRITICAL")
+        factor(
+            "Buyer reliability",
+            0.0,
+            "Buyer reliability signal is unavailable — no historical counterparty record found.",
+            "BUYER_RELIABILITY_UNKNOWN",
+            source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY,
+        )
+        missing_info.append("buyer_historical_rating")
 
-    # 3. Supplier operating history (graduated)
-    m = invoice.supplier_history_months
-    if m < 6:
-        factor("Supplier operating history", 12.0, f"New supplier with only {m} months of operating history.", "SUPPLIER_MATURITY_NEW")
-    elif m < 12:
-        factor("Supplier operating history", 8.0, f"Limited supplier history of {m} months.", "SUPPLIER_MATURITY_WEAK")
-    elif m < 24:
-        factor("Supplier operating history", 3.0, f"Developing supplier relationship with {m} months of history.", "SUPPLIER_MATURITY_WEAK")
-    elif m < 36:
-        factor("Supplier operating history", -5.0, f"Established supplier operating history of {m} months.", "SUPPLIER_MATURITY_STRONG")
+    # 2. Payment history (historical payment records)
+    r = invoice.on_time_payment_ratio if invoice.on_time_payment_ratio is not None else profile.on_time_payment_ratio
+    if r is not None:
+        if r >= 0.95:
+            factor("Payment history", -15.0, f"Exceptional on-time payment ratio of {r:.0%} based on historical payment records.", "PAYMENT_HISTORY_STRONG", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif r >= 0.90:
+            factor("Payment history", -10.0, f"Strong on-time payment ratio of {r:.0%} based on historical payment records.", "PAYMENT_HISTORY_STRONG", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif r >= 0.85:
+            factor("Payment history", -5.0, f"Acceptable on-time payment ratio of {r:.0%} based on historical payment records.", "PAYMENT_HISTORY_STRONG", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif r >= 0.70:
+            factor("Payment history", 5.0, f"On-time payment ratio of {r:.0%} shows moderate payment delays based on historical payment records.", "PAYMENT_HISTORY_WEAK", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif r >= 0.50:
+            factor("Payment history", 12.0, f"On-time payment ratio of {r:.0%} increases payment risk based on historical payment records.", "PAYMENT_HISTORY_WEAK", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        else:
+            factor("Payment history", 20.0, f"On-time payment ratio of {r:.0%} reflects critical delinquency based on historical payment records.", "PAYMENT_HISTORY_CRITICAL", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
     else:
-        factor("Supplier operating history", -8.0, f"Mature supplier relationship with {m} months of history.", "SUPPLIER_MATURITY_STRONG")
+        factor(
+            "Payment history",
+            0.0,
+            "On-time payment history is unavailable based on historical payment records.",
+            "PAYMENT_HISTORY_UNKNOWN",
+            source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY,
+        )
+        missing_info.append("buyer_payment_history")
 
-    # 4. Prior defaults
-    if invoice.prior_defaults > 0:
-        d = invoice.prior_defaults
-        pts = min(30.0, 15.0 * d)
-        code = "PRIOR_DEFAULT" if d == 1 else "MULTIPLE_PRIOR_DEFAULTS"
-        factor("Prior defaults", pts, f"{d} prior default(s) reported.", code)
+    # 3. Supplier operating history (supplier profile data)
+    m = invoice.supplier_history_months if invoice.supplier_history_months is not None else profile.supplier_history_months
+    if m is not None:
+        if m < 6:
+            factor("Supplier operating history", 12.0, f"New supplier with only {m} months of operating history based on supplier profile data.", "SUPPLIER_MATURITY_NEW", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif m < 12:
+            factor("Supplier operating history", 8.0, f"Limited supplier history of {m} months based on supplier profile data.", "SUPPLIER_MATURITY_WEAK", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif m < 24:
+            factor("Supplier operating history", 3.0, f"Developing supplier relationship with {m} months of history based on supplier profile data.", "SUPPLIER_MATURITY_WEAK", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif m < 36:
+            factor("Supplier operating history", -5.0, f"Established supplier operating history of {m} months based on supplier profile data.", "SUPPLIER_MATURITY_STRONG", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        else:
+            factor("Supplier operating history", -8.0, f"Mature supplier relationship with {m} months of history based on supplier profile data.", "SUPPLIER_MATURITY_STRONG", source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+    else:
+        factor(
+            "Supplier operating history",
+            0.0,
+            "Supplier operating history is unavailable based on supplier profile data.",
+            "SUPPLIER_MATURITY_UNKNOWN",
+            source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY,
+        )
+        missing_info.append("supplier_operating_history")
 
-    # 5. Invoice amount / concentration risk (graduated)
+    # 4. Prior defaults (historical defaults record)
+    d = invoice.prior_defaults if invoice.prior_defaults is not None else profile.prior_defaults
+    if d is not None:
+        if d > 0:
+            pts = min(30.0, 15.0 * d)
+            code = "PRIOR_DEFAULT" if d == 1 else "MULTIPLE_PRIOR_DEFAULTS"
+            factor("Prior defaults", pts, f"{d} prior default(s) recorded in historical counterparty data.", code, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+    else:
+        factor(
+            "Prior defaults",
+            0.0,
+            "Prior default history is unavailable.",
+            "DEFAULT_HISTORY_UNKNOWN",
+            source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY,
+        )
+        missing_info.append("prior_default_history")
+
+    # 5. Invoice amount / concentration risk (invoice-derived)
     amt = invoice.amount
     if amt >= 10_000_000:
-        factor("Large ticket", 12.0, f"Very large invoice size of ₹{amt:,.0f} creates high concentration risk.", "VERY_LARGE_INVOICE")
+        factor("Large ticket", 12.0, f"Very large invoice size of ₹{amt:,.0f} extracted from invoice document creates high concentration risk.", "VERY_LARGE_INVOICE", source_category=RiskFactorSource.INVOICE_DERIVED)
     elif amt >= 5_000_000:
-        factor("Large ticket", 8.0, f"Large invoice size of ₹{amt:,.0f} increases concentration risk in the demo policy.", "LARGE_INVOICE")
+        factor("Large ticket", 8.0, f"Large invoice size of ₹{amt:,.0f} extracted from invoice document increases concentration risk.", "LARGE_INVOICE", source_category=RiskFactorSource.INVOICE_DERIVED)
     elif amt >= 2_500_000:
-        factor("Large ticket", 4.0, f"Invoice amount of ₹{amt:,.0f} presents moderate concentration risk.", "LARGE_INVOICE")
+        factor("Large ticket", 4.0, f"Invoice amount of ₹{amt:,.0f} extracted from invoice document presents moderate concentration risk.", "LARGE_INVOICE", source_category=RiskFactorSource.INVOICE_DERIVED)
     elif amt >= 1_000_000:
-        factor("Large ticket", 2.0, f"Invoice amount of ₹{amt:,.0f} presents low concentration risk.", "CONCENTRATION_RISK")
+        factor("Large ticket", 2.0, f"Invoice amount of ₹{amt:,.0f} extracted from invoice document presents low concentration risk.", "CONCENTRATION_RISK", source_category=RiskFactorSource.INVOICE_DERIVED)
 
-    # 6. Invoice maturity / urgency
+    # 6. Invoice maturity / urgency (invoice-derived)
     today = date.today()
     if not invoice.due_date:
         factor(
             "Invoice maturity",
             0.0,
-            "Due date unavailable — maturity cannot be calculated.",
+            "Due date unavailable from invoice document — maturity cannot be calculated.",
             "MATURITY_UNKNOWN",
+            source_category=RiskFactorSource.INVOICE_DERIVED,
         )
     elif verification.status != VerificationStatus.REJECTED and invoice.due_date > today:
         days_until_due = (invoice.due_date - today).days
         if days_until_due <= 14:
-            factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_NEAR_DUE"], f"Invoice is due in {days_until_due} days, increasing repayment-urgency risk.", "MATURITY_NEAR_DUE")
+            factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_NEAR_DUE"], f"Invoice due date ({invoice.due_date}) indicates {days_until_due} days until due (urgent window).", "MATURITY_NEAR_DUE", source_category=RiskFactorSource.INVOICE_DERIVED)
         elif days_until_due <= 30:
-            factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_SHORT_TENOR"], f"Invoice is due in {days_until_due} days, short tenor window.", "MATURITY_SHORT_TENOR")
+            factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_SHORT_TENOR"], f"Invoice due date ({invoice.due_date}) indicates {days_until_due} days until due (short tenor).", "MATURITY_SHORT_TENOR", source_category=RiskFactorSource.INVOICE_DERIVED)
         elif days_until_due <= 60:
-            factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_MEDIUM_TENOR"], f"Invoice is due in {days_until_due} days, moderate tenor window.", "MATURITY_MEDIUM_TENOR")
+            factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_MEDIUM_TENOR"], f"Invoice due date ({invoice.due_date}) indicates {days_until_due} days until due (moderate tenor).", "MATURITY_MEDIUM_TENOR", source_category=RiskFactorSource.INVOICE_DERIVED)
 
-    # 7. Verification uncertainty / rejection
+    # 7. Verification uncertainty / rejection (verification-derived)
     if verification.status == VerificationStatus.PARTIALLY_VERIFIED:
-        factor("Verification uncertainty", RISK_POLICY_WEIGHTS["VERIFICATION_UNCERTAIN"], "Missing fields increase information asymmetry.", "VERIFICATION_UNCERTAIN")
+        factor("Verification uncertainty", RISK_POLICY_WEIGHTS["VERIFICATION_UNCERTAIN"], "Missing fields from invoice document increase information asymmetry.", "VERIFICATION_UNCERTAIN", source_category=RiskFactorSource.VERIFICATION_CHECK)
     elif verification.status == VerificationStatus.REJECTED:
-        factor("Verification rejected", RISK_POLICY_WEIGHTS["VERIFICATION_REJECTED"], "Invoice failed the synthetic verification policy.", "VERIFICATION_REJECTED")
+        factor("Verification rejected", RISK_POLICY_WEIGHTS["VERIFICATION_REJECTED"], "Invoice document failed deterministic verification policy.", "VERIFICATION_REJECTED", source_category=RiskFactorSource.VERIFICATION_CHECK)
 
-    # 8. Duplicate invoice factor
+    # 8. Duplicate invoice factor (verification-derived)
     if verification.duplicate_check and verification.duplicate_check.duplicate_detected:
         matched_no = verification.duplicate_check.matched_invoice_number or "prior invoice"
-        factor("Duplicate invoice", RISK_POLICY_WEIGHTS["DUPLICATE_INVOICE"], f"Invoice matches prior submission {matched_no} across supplier, buyer, and amount.", "DUPLICATE_INVOICE")
+        factor("Duplicate invoice", RISK_POLICY_WEIGHTS["DUPLICATE_INVOICE"], f"Invoice matches prior submission {matched_no} across supplier, buyer, and amount.", "DUPLICATE_INVOICE", source_category=RiskFactorSource.VERIFICATION_CHECK)
 
-    # 9. Amount consistency mismatch factor
+    # 9. Amount consistency mismatch factor (invoice-derived)
     if "AMOUNT_MISMATCH" in verification.reason_codes:
         if invoice.subtotal is not None and invoice.tax_amount is not None:
             expected_total = round(invoice.subtotal + invoice.tax_amount, 2)
@@ -533,19 +689,19 @@ def assess_risk(invoice: Invoice, verification: VerificationResult) -> RiskAsses
             expl = f"Declared total ₹{invoice.amount:,.0f} differs from subtotal (₹{invoice.subtotal:,.0f}) + tax (₹{invoice.tax_amount:,.0f}) = ₹{expected_total:,.0f} by ₹{diff:,.0f}."
         else:
             expl = "Declared invoice total does not reconcile with subtotal plus tax."
-        factor("Amount consistency mismatch", RISK_POLICY_WEIGHTS["AMOUNT_MISMATCH"], expl, "AMOUNT_MISMATCH")
+        factor("Amount consistency mismatch", RISK_POLICY_WEIGHTS["AMOUNT_MISMATCH"], expl, "AMOUNT_MISMATCH", source_category=RiskFactorSource.INVOICE_DERIVED)
 
-    # 10. GSTIN entity mismatch factor
+    # 10. GSTIN entity mismatch factor (invoice-derived)
     if "GSTIN_ENTITY_MISMATCH" in verification.reason_codes:
-        expl = "GSTIN PAN entity structure is inconsistent with the supplier name provided."
+        expl = "GSTIN PAN entity structure is inconsistent with the supplier name provided in document."
         if verification.gstin_check and verification.gstin_check.warnings:
             for w in verification.gstin_check.warnings:
                 if "indicates" in w.lower():
                     expl = w
                     break
-        factor("GSTIN entity consistency", RISK_POLICY_WEIGHTS["GSTIN_ENTITY_MISMATCH"], expl, "GSTIN_ENTITY_MISMATCH")
+        factor("GSTIN entity consistency", RISK_POLICY_WEIGHTS["GSTIN_ENTITY_MISMATCH"], expl, "GSTIN_ENTITY_MISMATCH", source_category=RiskFactorSource.INVOICE_DERIVED)
 
-    # 11. GSTIN state mismatch factor
+    # 11. GSTIN state mismatch factor (invoice-derived)
     if "GSTIN_STATE_MISMATCH" in verification.reason_codes:
         expl = "Supplier location is inconsistent with the GSTIN state code."
         if verification.gstin_check and verification.gstin_check.warnings:
@@ -553,17 +709,17 @@ def assess_risk(invoice: Invoice, verification: VerificationResult) -> RiskAsses
                 if "state" in w.lower():
                     expl = w
                     break
-        factor("GSTIN state consistency", RISK_POLICY_WEIGHTS["GSTIN_STATE_MISMATCH"], expl, "GSTIN_STATE_MISMATCH")
+        factor("GSTIN state consistency", RISK_POLICY_WEIGHTS["GSTIN_STATE_MISMATCH"], expl, "GSTIN_STATE_MISMATCH", source_category=RiskFactorSource.INVOICE_DERIVED)
 
     score = round(max(0.0, min(100.0, score)), 1)
     band = RiskBand.LOW if score < 30 else RiskBand.MODERATE if score < 55 else RiskBand.HIGH if score < 75 else RiskBand.SEVERE
-    confidence = round(0.96 - 0.08 * len(verification.uncertain_fields), 2)
+    confidence = round(0.96 - 0.08 * len(missing_info), 2)
     assessment = RiskAssessment(
         score=score,
         band=band,
         confidence=confidence,
         factors=factors,
-        missing_information=verification.uncertain_fields,
+        missing_information=missing_info,
     )
     assessment.summary = generate_risk_summary(assessment, invoice)
     return assessment
@@ -662,7 +818,16 @@ def simulate_risk_change(
     score = RISK_POLICY_WEIGHTS["BASE_SCORE"]
     modified_factors: list[RiskFactor] = []
 
-    def sim_factor(label: str, points: float, explanation: str, reason_code: str, is_modified: bool = False):
+    profile = invoice.counterparty_profile or resolve_counterparty_profile(invoice)
+
+    def sim_factor(
+        label: str,
+        points: float,
+        explanation: str,
+        reason_code: str,
+        is_modified: bool = False,
+        source_category: RiskFactorSource = RiskFactorSource.POLICY_RULE,
+    ):
         nonlocal score
         score += points
         impact = "negative" if points > 0 else "positive" if points < 0 else "neutral"
@@ -672,96 +837,108 @@ def simulate_risk_change(
             impact=impact,
             explanation=explanation,
             reason_code=reason_code,
+            source_category=source_category,
         )
         sim_factors.append(rf)
         if is_modified:
             modified_factors.append(rf)
 
     # 1. Buyer reliability
-    sim_buyer_rating = simulation.simulated_buyer_rating if simulation.simulated_buyer_rating is not None else invoice.buyer_rating
-    buyer_pts = RISK_POLICY_WEIGHTS["BUYER_RATING_MULTIPLIER"] * sim_buyer_rating
-    buyer_code = "BUYER_RELIABILITY_STRONG" if sim_buyer_rating >= 0.75 else "BUYER_RELIABILITY_WEAK"
-    sim_factor("Buyer reliability", buyer_pts, f"Buyer reliability signal is {sim_buyer_rating:.0%}.", buyer_code, is_modified=simulation.simulated_buyer_rating is not None)
+    sim_buyer_rating = simulation.simulated_buyer_rating if simulation.simulated_buyer_rating is not None else (invoice.buyer_rating if invoice.buyer_rating is not None else profile.buyer_rating)
+    if sim_buyer_rating is not None:
+        buyer_pts = RISK_POLICY_WEIGHTS["BUYER_RATING_MULTIPLIER"] * sim_buyer_rating
+        buyer_code = "BUYER_RELIABILITY_STRONG" if sim_buyer_rating >= 0.75 else "BUYER_RELIABILITY_WEAK"
+        sim_factor("Buyer reliability", buyer_pts, f"Buyer reliability signal is {sim_buyer_rating:.0%} based on historical counterparty data.", buyer_code, is_modified=simulation.simulated_buyer_rating is not None, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+    else:
+        sim_factor("Buyer reliability", 0.0, "Buyer reliability signal is unavailable — no historical counterparty record found.", "BUYER_RELIABILITY_UNKNOWN", is_modified=False, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
 
     # 2. Payment history
-    r = simulation.simulated_on_time_payment_ratio if simulation.simulated_on_time_payment_ratio is not None else invoice.on_time_payment_ratio
+    r = simulation.simulated_on_time_payment_ratio if simulation.simulated_on_time_payment_ratio is not None else (invoice.on_time_payment_ratio if invoice.on_time_payment_ratio is not None else profile.on_time_payment_ratio)
     is_pmt_mod = simulation.simulated_on_time_payment_ratio is not None
-    if r >= 0.95:
-        sim_factor("Payment history", -15.0, f"Exceptional on-time payment ratio of {r:.0%}.", "PAYMENT_HISTORY_STRONG", is_modified=is_pmt_mod)
-    elif r >= 0.90:
-        sim_factor("Payment history", -10.0, f"Strong on-time payment ratio of {r:.0%}.", "PAYMENT_HISTORY_STRONG", is_modified=is_pmt_mod)
-    elif r >= 0.85:
-        sim_factor("Payment history", -5.0, f"Acceptable on-time payment ratio of {r:.0%}.", "PAYMENT_HISTORY_STRONG", is_modified=is_pmt_mod)
-    elif r >= 0.70:
-        sim_factor("Payment history", 5.0, f"On-time payment ratio of {r:.0%} shows moderate payment delays.", "PAYMENT_HISTORY_WEAK", is_modified=is_pmt_mod)
-    elif r >= 0.50:
-        sim_factor("Payment history", 12.0, f"On-time payment ratio of {r:.0%} increases payment risk.", "PAYMENT_HISTORY_WEAK", is_modified=is_pmt_mod)
+    if r is not None:
+        if r >= 0.95:
+            sim_factor("Payment history", -15.0, f"Exceptional on-time payment ratio of {r:.0%} based on historical payment records.", "PAYMENT_HISTORY_STRONG", is_modified=is_pmt_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif r >= 0.90:
+            sim_factor("Payment history", -10.0, f"Strong on-time payment ratio of {r:.0%} based on historical payment records.", "PAYMENT_HISTORY_STRONG", is_modified=is_pmt_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif r >= 0.85:
+            sim_factor("Payment history", -5.0, f"Acceptable on-time payment ratio of {r:.0%} based on historical payment records.", "PAYMENT_HISTORY_STRONG", is_modified=is_pmt_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif r >= 0.70:
+            sim_factor("Payment history", 5.0, f"On-time payment ratio of {r:.0%} shows moderate payment delays based on historical payment records.", "PAYMENT_HISTORY_WEAK", is_modified=is_pmt_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif r >= 0.50:
+            sim_factor("Payment history", 12.0, f"On-time payment ratio of {r:.0%} increases payment risk based on historical payment records.", "PAYMENT_HISTORY_WEAK", is_modified=is_pmt_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        else:
+            sim_factor("Payment history", 20.0, f"On-time payment ratio of {r:.0%} reflects critical delinquency based on historical payment records.", "PAYMENT_HISTORY_CRITICAL", is_modified=is_pmt_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
     else:
-        sim_factor("Payment history", 20.0, f"On-time payment ratio of {r:.0%} reflects critical delinquency.", "PAYMENT_HISTORY_CRITICAL", is_modified=is_pmt_mod)
+        sim_factor("Payment history", 0.0, "On-time payment history is unavailable based on historical payment records.", "PAYMENT_HISTORY_UNKNOWN", is_modified=False, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
 
     # 3. Supplier operating history
-    m = simulation.simulated_supplier_history_months if simulation.simulated_supplier_history_months is not None else invoice.supplier_history_months
+    m = simulation.simulated_supplier_history_months if simulation.simulated_supplier_history_months is not None else (invoice.supplier_history_months if invoice.supplier_history_months is not None else profile.supplier_history_months)
     is_sup_mod = simulation.simulated_supplier_history_months is not None
-    if m < 6:
-        sim_factor("Supplier operating history", 12.0, f"New supplier with only {m} months of operating history.", "SUPPLIER_MATURITY_NEW", is_modified=is_sup_mod)
-    elif m < 12:
-        sim_factor("Supplier operating history", 8.0, f"Limited supplier history of {m} months.", "SUPPLIER_MATURITY_WEAK", is_modified=is_sup_mod)
-    elif m < 24:
-        sim_factor("Supplier operating history", 3.0, f"Developing supplier relationship with {m} months of history.", "SUPPLIER_MATURITY_WEAK", is_modified=is_sup_mod)
-    elif m < 36:
-        sim_factor("Supplier operating history", -5.0, f"Established supplier operating history of {m} months.", "SUPPLIER_MATURITY_STRONG", is_modified=is_sup_mod)
+    if m is not None:
+        if m < 6:
+            sim_factor("Supplier operating history", 12.0, f"New supplier with only {m} months of operating history based on supplier profile data.", "SUPPLIER_MATURITY_NEW", is_modified=is_sup_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif m < 12:
+            sim_factor("Supplier operating history", 8.0, f"Limited supplier history of {m} months based on supplier profile data.", "SUPPLIER_MATURITY_WEAK", is_modified=is_sup_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif m < 24:
+            sim_factor("Supplier operating history", 3.0, f"Developing supplier relationship with {m} months of history based on supplier profile data.", "SUPPLIER_MATURITY_WEAK", is_modified=is_sup_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        elif m < 36:
+            sim_factor("Supplier operating history", -5.0, f"Established supplier operating history of {m} months based on supplier profile data.", "SUPPLIER_MATURITY_STRONG", is_modified=is_sup_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+        else:
+            sim_factor("Supplier operating history", -8.0, f"Mature supplier relationship with {m} months of history based on supplier profile data.", "SUPPLIER_MATURITY_STRONG", is_modified=is_sup_mod, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
     else:
-        sim_factor("Supplier operating history", -8.0, f"Mature supplier relationship with {m} months of history.", "SUPPLIER_MATURITY_STRONG", is_modified=is_sup_mod)
+        sim_factor("Supplier operating history", 0.0, "Supplier operating history is unavailable based on supplier profile data.", "SUPPLIER_MATURITY_UNKNOWN", is_modified=False, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
 
     # 4. Prior defaults
-    d = simulation.simulated_prior_defaults if simulation.simulated_prior_defaults is not None else invoice.prior_defaults
-    if d > 0:
+    d = simulation.simulated_prior_defaults if simulation.simulated_prior_defaults is not None else (invoice.prior_defaults if invoice.prior_defaults is not None else profile.prior_defaults)
+    if d is not None and d > 0:
         pts = min(30.0, 15.0 * d)
         code = "PRIOR_DEFAULT" if d == 1 else "MULTIPLE_PRIOR_DEFAULTS"
-        sim_factor("Prior defaults", pts, f"{d} prior default(s) reported.", code, is_modified=simulation.simulated_prior_defaults is not None)
+        sim_factor("Prior defaults", pts, f"{d} prior default(s) recorded in historical counterparty data.", code, is_modified=simulation.simulated_prior_defaults is not None, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
+    elif d is None:
+        sim_factor("Prior defaults", 0.0, "Prior default history is unavailable.", "DEFAULT_HISTORY_UNKNOWN", is_modified=False, source_category=RiskFactorSource.HISTORICAL_COUNTERPARTY)
 
     # 5. Large ticket / amount concentration
     amt = simulation.simulated_amount if simulation.simulated_amount is not None else invoice.amount
     is_amt_mod = simulation.simulated_amount is not None
     if amt >= 10_000_000:
-        sim_factor("Large ticket", 12.0, f"Very large invoice size of ₹{amt:,.0f} creates high concentration risk.", "VERY_LARGE_INVOICE", is_modified=is_amt_mod)
+        sim_factor("Large ticket", 12.0, f"Very large invoice size of ₹{amt:,.0f} extracted from invoice creates high concentration risk.", "VERY_LARGE_INVOICE", is_modified=is_amt_mod, source_category=RiskFactorSource.INVOICE_DERIVED)
     elif amt >= 5_000_000:
-        sim_factor("Large ticket", 8.0, f"Large invoice size of ₹{amt:,.0f} increases concentration risk in the demo policy.", "LARGE_INVOICE", is_modified=is_amt_mod)
+        sim_factor("Large ticket", 8.0, f"Large invoice size of ₹{amt:,.0f} extracted from invoice increases concentration risk.", "LARGE_INVOICE", is_modified=is_amt_mod, source_category=RiskFactorSource.INVOICE_DERIVED)
     elif amt >= 2_500_000:
-        sim_factor("Large ticket", 4.0, f"Invoice amount of ₹{amt:,.0f} presents moderate concentration risk.", "LARGE_INVOICE", is_modified=is_amt_mod)
+        sim_factor("Large ticket", 4.0, f"Invoice amount of ₹{amt:,.0f} extracted from invoice presents moderate concentration risk.", "LARGE_INVOICE", is_modified=is_amt_mod, source_category=RiskFactorSource.INVOICE_DERIVED)
     elif amt >= 1_000_000:
-        sim_factor("Large ticket", 2.0, f"Invoice amount of ₹{amt:,.0f} presents low concentration risk.", "CONCENTRATION_RISK", is_modified=is_amt_mod)
+        sim_factor("Large ticket", 2.0, f"Invoice amount of ₹{amt:,.0f} extracted from invoice presents low concentration risk.", "CONCENTRATION_RISK", is_modified=is_amt_mod, source_category=RiskFactorSource.INVOICE_DERIVED)
 
     # 6. Invoice maturity
     today = date.today()
     if simulation.simulated_days_until_due is not None:
         days = simulation.simulated_days_until_due
         if days <= 14:
-            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_NEAR_DUE"], f"Invoice is due in {days} days, increasing repayment-urgency risk.", "MATURITY_NEAR_DUE", is_modified=True)
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_NEAR_DUE"], f"Invoice is due in {days} days, increasing repayment-urgency risk.", "MATURITY_NEAR_DUE", is_modified=True, source_category=RiskFactorSource.INVOICE_DERIVED)
         elif days <= 30:
-            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_SHORT_TENOR"], f"Invoice is due in {days} days, short tenor window.", "MATURITY_SHORT_TENOR", is_modified=True)
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_SHORT_TENOR"], f"Invoice is due in {days} days, short tenor window.", "MATURITY_SHORT_TENOR", is_modified=True, source_category=RiskFactorSource.INVOICE_DERIVED)
         elif days <= 60:
-            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_MEDIUM_TENOR"], f"Invoice is due in {days} days, moderate tenor window.", "MATURITY_MEDIUM_TENOR", is_modified=True)
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_MEDIUM_TENOR"], f"Invoice is due in {days} days, moderate tenor window.", "MATURITY_MEDIUM_TENOR", is_modified=True, source_category=RiskFactorSource.INVOICE_DERIVED)
         else:
-            sim_factor("Invoice maturity", 0.0, f"Invoice is due in {days} days (>60 days), low maturity urgency.", "MATURITY_LONG_TENOR", is_modified=True)
+            sim_factor("Invoice maturity", 0.0, f"Invoice is due in {days} days (>60 days), low maturity urgency.", "MATURITY_LONG_TENOR", is_modified=True, source_category=RiskFactorSource.INVOICE_DERIVED)
     elif not invoice.due_date:
-        sim_factor("Invoice maturity", 0.0, "Due date unavailable — maturity cannot be calculated.", "MATURITY_UNKNOWN")
+        sim_factor("Invoice maturity", 0.0, "Due date unavailable from invoice — maturity cannot be calculated.", "MATURITY_UNKNOWN", source_category=RiskFactorSource.INVOICE_DERIVED)
     elif verification.status != VerificationStatus.REJECTED and invoice.due_date > today:
         days = (invoice.due_date - today).days
         if days <= 14:
-            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_NEAR_DUE"], f"Invoice is due in {days} days, increasing repayment-urgency risk.", "MATURITY_NEAR_DUE")
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_NEAR_DUE"], f"Invoice is due in {days} days, increasing repayment-urgency risk.", "MATURITY_NEAR_DUE", source_category=RiskFactorSource.INVOICE_DERIVED)
         elif days <= 30:
-            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_SHORT_TENOR"], f"Invoice is due in {days} days, short tenor window.", "MATURITY_SHORT_TENOR")
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_SHORT_TENOR"], f"Invoice is due in {days} days, short tenor window.", "MATURITY_SHORT_TENOR", source_category=RiskFactorSource.INVOICE_DERIVED)
         elif days <= 60:
-            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_MEDIUM_TENOR"], f"Invoice is due in {days} days, moderate tenor window.", "MATURITY_MEDIUM_TENOR")
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_MEDIUM_TENOR"], f"Invoice is due in {days} days, moderate tenor window.", "MATURITY_MEDIUM_TENOR", source_category=RiskFactorSource.INVOICE_DERIVED)
 
     # 7. Verification status
     v_status = simulation.simulated_verification_status or verification.status
     is_ver_mod = simulation.simulated_verification_status is not None
     if v_status == VerificationStatus.PARTIALLY_VERIFIED:
-        sim_factor("Verification uncertainty", RISK_POLICY_WEIGHTS["VERIFICATION_UNCERTAIN"], "Missing fields increase information asymmetry.", "VERIFICATION_UNCERTAIN", is_modified=is_ver_mod)
+        sim_factor("Verification uncertainty", RISK_POLICY_WEIGHTS["VERIFICATION_UNCERTAIN"], "Missing fields increase information asymmetry.", "VERIFICATION_UNCERTAIN", is_modified=is_ver_mod, source_category=RiskFactorSource.VERIFICATION_CHECK)
     elif v_status == VerificationStatus.REJECTED:
-        sim_factor("Verification rejected", RISK_POLICY_WEIGHTS["VERIFICATION_REJECTED"], "Invoice failed the synthetic verification policy.", "VERIFICATION_REJECTED", is_modified=is_ver_mod)
+        sim_factor("Verification rejected", RISK_POLICY_WEIGHTS["VERIFICATION_REJECTED"], "Invoice failed the synthetic verification policy.", "VERIFICATION_REJECTED", is_modified=is_ver_mod, source_category=RiskFactorSource.VERIFICATION_CHECK)
 
     # 8. Duplicate invoice
     if simulation.simulate_duplicate is not None:
@@ -772,19 +949,19 @@ def simulate_risk_change(
         is_dup_mod = False
     if is_dup:
         matched_no = (verification.duplicate_check.matched_invoice_number if verification.duplicate_check else None) or "simulated duplicate"
-        sim_factor("Duplicate invoice", RISK_POLICY_WEIGHTS["DUPLICATE_INVOICE"], f"Invoice matches prior submission {matched_no}.", "DUPLICATE_INVOICE", is_modified=is_dup_mod)
+        sim_factor("Duplicate invoice", RISK_POLICY_WEIGHTS["DUPLICATE_INVOICE"], f"Invoice matches prior submission {matched_no}.", "DUPLICATE_INVOICE", is_modified=is_dup_mod, source_category=RiskFactorSource.VERIFICATION_CHECK)
 
     # 9. Amount consistency mismatch
     if "AMOUNT_MISMATCH" in verification.reason_codes:
-        sim_factor("Amount consistency mismatch", RISK_POLICY_WEIGHTS["AMOUNT_MISMATCH"], "Declared invoice total does not reconcile with subtotal plus tax.", "AMOUNT_MISMATCH")
+        sim_factor("Amount consistency mismatch", RISK_POLICY_WEIGHTS["AMOUNT_MISMATCH"], "Declared invoice total does not reconcile with subtotal plus tax.", "AMOUNT_MISMATCH", source_category=RiskFactorSource.INVOICE_DERIVED)
 
     # 10. GSTIN entity mismatch
     if "GSTIN_ENTITY_MISMATCH" in verification.reason_codes:
-        sim_factor("GSTIN entity consistency", RISK_POLICY_WEIGHTS["GSTIN_ENTITY_MISMATCH"], "GSTIN PAN entity structure is inconsistent with supplier name.", "GSTIN_ENTITY_MISMATCH")
+        sim_factor("GSTIN entity consistency", RISK_POLICY_WEIGHTS["GSTIN_ENTITY_MISMATCH"], "GSTIN PAN entity structure is inconsistent with supplier name.", "GSTIN_ENTITY_MISMATCH", source_category=RiskFactorSource.INVOICE_DERIVED)
 
     # 11. GSTIN state mismatch
     if "GSTIN_STATE_MISMATCH" in verification.reason_codes:
-        sim_factor("GSTIN state consistency", RISK_POLICY_WEIGHTS["GSTIN_STATE_MISMATCH"], "Supplier location is inconsistent with GSTIN state code.", "GSTIN_STATE_MISMATCH")
+        sim_factor("GSTIN state consistency", RISK_POLICY_WEIGHTS["GSTIN_STATE_MISMATCH"], "Supplier location is inconsistent with GSTIN state code.", "GSTIN_STATE_MISMATCH", source_category=RiskFactorSource.INVOICE_DERIVED)
 
     sim_score = round(max(0.0, min(100.0, score)), 1)
     sim_band = RiskBand.LOW if sim_score < 30 else RiskBand.MODERATE if sim_score < 55 else RiskBand.HIGH if sim_score < 75 else RiskBand.SEVERE

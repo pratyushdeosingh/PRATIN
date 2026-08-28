@@ -355,11 +355,9 @@ def parse_and_evaluate_pdf(
                 subtotal=extracted.subtotal,
                 tax_amount=extracted.tax_amount,
                 supplier_state=extracted.supplier_state,
-                buyer_rating=0.75,
-                supplier_history_months=24,
-                on_time_payment_ratio=0.86,
-                prior_defaults=0,
             )
+            from .engine import resolve_counterparty_profile
+            inv.counterparty_profile = resolve_counterparty_profile(inv, existing_invoices)
             eval_res = evaluate(inv, existing_invoices)
             # Update provenance to indicate SERVICE
             eval_res = eval_res.model_copy(update={"provenance": "SERVICE"})

@@ -26,6 +26,15 @@ class RiskBand(str, Enum):
     SEVERE = "SEVERE"
 
 
+class CounterpartyHistoricalProfile(StrictModel):
+    buyer_rating: float | None = Field(default=None, ge=0, le=1)
+    on_time_payment_ratio: float | None = Field(default=None, ge=0, le=1)
+    supplier_history_months: int | None = Field(default=None, ge=0)
+    prior_defaults: int | None = Field(default=None, ge=0)
+    source: Literal["STORE_DERIVED", "SEEDED_REGISTRY", "DEMO_DEFAULT", "UNAVAILABLE"] = "DEMO_DEFAULT"
+    provenance_detail: str = "Demo synthetic counterparty profile"
+
+
 class Invoice(StrictModel):
     invoice_number: str = Field(min_length=3)
     supplier_name: str
@@ -40,10 +49,11 @@ class Invoice(StrictModel):
     subtotal: float | None = None
     tax_amount: float | None = None
     supplier_state: str | None = None
-    buyer_rating: float = Field(default=0.75, ge=0, le=1)
-    supplier_history_months: int = Field(default=24, ge=0)
-    on_time_payment_ratio: float = Field(default=0.86, ge=0, le=1)
-    prior_defaults: int = Field(default=0, ge=0)
+    buyer_rating: float | None = Field(default=None, ge=0, le=1)
+    supplier_history_months: int | None = Field(default=None, ge=0)
+    on_time_payment_ratio: float | None = Field(default=None, ge=0, le=1)
+    prior_defaults: int | None = Field(default=None, ge=0)
+    counterparty_profile: CounterpartyHistoricalProfile | None = None
 
     @field_validator("due_date")
     @classmethod
@@ -111,12 +121,20 @@ class VerificationResult(StrictModel):
     simulation_notice: str = "Synthetic rule-based verification; not a banking, GST, KYC, or legal verification."
 
 
+class RiskFactorSource(str, Enum):
+    INVOICE_DERIVED = "INVOICE_DERIVED"
+    HISTORICAL_COUNTERPARTY = "HISTORICAL_COUNTERPARTY"
+    VERIFICATION_CHECK = "VERIFICATION_CHECK"
+    POLICY_RULE = "POLICY_RULE"
+
+
 class RiskFactor(StrictModel):
     label: str
     impact: Literal["positive", "negative", "neutral"]
     points: float
     explanation: str
     reason_code: str | None = None
+    source_category: RiskFactorSource = RiskFactorSource.POLICY_RULE
 
 
 class RiskDecisionSummary(StrictModel):
