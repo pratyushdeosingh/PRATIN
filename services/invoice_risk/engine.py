@@ -117,13 +117,16 @@ def verify_invoice(invoice: Invoice, existing_invoices: list[Invoice] | None = N
 
     # 4. Positive Amount
     if invoice.amount <= 0:
+        code = "ZERO_INVOICE_AMOUNT" if invoice.amount == 0 else "NEGATIVE_INVOICE_AMOUNT"
         return VerificationResult(
             status=VerificationStatus.REJECTED,
             confidence=0.96,
             verified_fields=verified,
             uncertain_fields=uncertain,
             reasons=["Invoice amount must be positive."],
-            reason_codes=["NON_POSITIVE_AMOUNT", "INVOICE_AMOUNT_INVALID"],
+            reason_codes=[code, "NON_POSITIVE_AMOUNT", "INVOICE_AMOUNT_INVALID"],
+            duplicate_check=dup_res,
+            consistency_warnings=["Invoice amount must be strictly positive."],
         )
     verified.append("amount")
 
@@ -354,7 +357,13 @@ def assess_risk(invoice: Invoice, verification: VerificationResult) -> RiskAsses
 
     # 9. Amount consistency mismatch factor
     if "AMOUNT_MISMATCH" in verification.reason_codes:
-        factor("Amount consistency mismatch", RISK_POLICY_WEIGHTS["AMOUNT_MISMATCH"], "Declared invoice total does not reconcile with subtotal plus tax.", "AMOUNT_MISMATCH")
+        if invoice.subtotal is not None and invoice.tax_amount is not None:
+            expected_total = round(invoice.subtotal + invoice.tax_amount, 2)
+            diff = round(abs(expected_total - round(invoice.amount, 2)), 2)
+            expl = f"Declared total ₹{invoice.amount:,.0f} differs from subtotal (₹{invoice.subtotal:,.0f}) + tax (₹{invoice.tax_amount:,.0f}) = ₹{expected_total:,.0f} by ₹{diff:,.0f}."
+        else:
+            expl = "Declared invoice total does not reconcile with subtotal plus tax."
+        factor("Amount consistency mismatch", RISK_POLICY_WEIGHTS["AMOUNT_MISMATCH"], expl, "AMOUNT_MISMATCH")
 
     score = round(max(0.0, min(100.0, score)), 1)
     band = RiskBand.LOW if score < 30 else RiskBand.MODERATE if score < 55 else RiskBand.HIGH if score < 75 else RiskBand.SEVERE
