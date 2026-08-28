@@ -2,6 +2,7 @@
   "name": "pratin-market-cockpit",
   "private": true,
   "version": "1.0.0",
+  "packageManager": "pnpm@11.19.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
