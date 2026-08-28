@@ -1,35 +1,107 @@
 import {useMemo,useState} from 'react'
 import {ArrowRight,BadgeCheck,Bolt,Building2,CircleDollarSign,Gauge,Landmark,Radar,RotateCcw,ShieldCheck,Sparkles} from 'lucide-react'
-import {api,Metrics,Opportunity,RankedOffer} from './api'
+import {api,AuditEvent,IntegrationStatus,Metrics,Opportunity,Provider,RankedOffer,Settlement} from './api'
 
 export const money=(n:number)=>new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(n)
 const lifecycle=['Invoice','Verify','Assess risk','Discover','Compete','Match','Finance','Settle','Reallocate']
-const initialMetrics:Metrics={available_liquidity:15_050_000,active_opportunities:12,offers_generated:38,financing_allocated:6_480_000,settlements:7,provider_participation_rate:.79}
-const initialOffers:RankedOffer[]=[
- {offer:{id:'a',provider_id:'bank-a',provider_name:'Astra Commercial Bank',provider_type:'BANK',status:'OFFER',annual_rate:9,financed_amount:700000,fees:1400,settlement_hours:96,total_effective_cost:11756,reasons:[]},eligible:false,suitability_score:0,hard_constraint_failures:['Offers ₹7,00,000, below required ₹8,00,000.','Settlement takes 96h, beyond the 48h limit.'],rank:null},
- {offer:{id:'b',provider_id:'nbfc-b',provider_name:'VegaFlow NBFC',provider_type:'NBFC',status:'OFFER',annual_rate:11,financed_amount:850000,fees:6800,settlement_hours:24,total_effective_cost:22171,reasons:[]},eligible:true,suitability_score:91,hard_constraint_failures:[],rank:1},
- {offer:{id:'c',provider_id:'fintech-c',provider_name:'PulseTrade Capital',provider_type:'FINTECH',status:'OFFER',annual_rate:12,financed_amount:900000,fees:40000,settlement_hours:2,total_effective_cost:57753,reasons:[]},eligible:true,suitability_score:84,hard_constraint_failures:[],rank:2}]
+type Phase='idle'|'loading'|'ready'|'settling'|'settled'|'rerunning'|'completed'|'error'
+type AllocationHistory={sequence:number;invoice:string;provider:string;rate:number|null;amount:number|null;liquidityBefore?:number;liquidityAfter?:number;exposureBefore?:number;exposureAfter?:number}
+type Receipt={settlement:Settlement;before:Provider;after:Provider}
+
+const provenanceLabel=(status?:IntegrationStatus)=>status?.replace('_',' ')||'UNAVAILABLE'
+const provenanceClass=(status?:IntegrationStatus)=>status==='SERVICE'?'service':status==='DEGRADED_FIXTURE'?'degraded':status==='FIXTURE'?'fixture':'unavailable'
 
 export default function App(){
- const [opportunity,setOpportunity]=useState<Opportunity|null>(null),[metrics,setMetrics]=useState(initialMetrics),[phase,setPhase]=useState<'idle'|'running'|'ready'|'settled'|'reallocated'|'error'>('idle'),[error,setError]=useState('')
- const offers=opportunity?.match?.ranked_offers||initialOffers,winner=offers.find(x=>x.offer.id===(opportunity?.match?.recommended_offer_id||'b'))||offers.find(x=>x.rank===1)
- const activeStep=phase==='settled'||phase==='reallocated'?9:phase==='ready'?7:phase==='running'?3:6
- const invoice=opportunity?.invoice||{invoice_number:'INV-PRATIN-1001',supplier_name:'Shakti Components',buyer_name:'Orion Auto Systems',amount:1_000_000}
- const req=opportunity?.requirements||{minimum_amount:800_000,max_settlement_hours:48,desired_tenor_days:60}
- const risk=opportunity?.evaluation?.risk||{score:24,band:'LOW–MODERATE'}
- const verification=opportunity?.evaluation?.verification||{status:'VERIFIED',confidence:.95}
- const run=async()=>{setError('');setPhase('running');try{await api.reset();const scenarios=await api.scenarios();const created=await api.create(scenarios.urgent);setOpportunity(created);const result=await api.run(created.id);setOpportunity(result);setMetrics(await api.metrics());setPhase('ready')}catch(e){setError(e instanceof Error?e.message:'Market failed');setPhase('error')}}
- const reallocate=async()=>{setError('');setPhase('running');try{const scenarios=await api.scenarios();const created=await api.create(scenarios.strong);const result=await api.run(created.id);setOpportunity(result);setMetrics(await api.metrics());setPhase('reallocated')}catch(e){setError(e instanceof Error?e.message:'Reallocation failed');setPhase('error')}}
- const settle=async()=>{if(!opportunity||!winner)return;setError('');try{await api.settle(opportunity.id,winner.offer.id);setMetrics(await api.metrics());setPhase('settled')}catch(e){setError(e instanceof Error?e.message:'Settlement failed')}}
- const winnerName=winner?.offer.provider_name||'VegaFlow NBFC'
- const agentLatency=useMemo(()=>phase==='running'?'clearing now…':'agents evaluated deterministically',[phase])
- return <div className="shell"><aside className="rail"><div className="brand"><span>P</span><div>PRATIN<small>CAPITAL NETWORK</small></div></div><nav><button className="active"><Gauge/>Market pulse</button><button><Radar/>Opportunities</button><button><Landmark/>Capital agents</button><button><ShieldCheck/>Risk ledger</button></nav><div className="rail-foot"><span className="live-dot"/> MARKET ONLINE<small>Demo rail • No real funds</small></div></aside>
- <main><header><div><p className="eyebrow">CONTINUOUS CLEARING • LIVE DEMO MARKET</p><h1>Capital, intelligently <em>allocated.</em></h1><p className="lede">Every verified invoice enters a competitive market where autonomous providers price risk, protect portfolios and race to satisfy the supplier.</p></div><button className="primary" onClick={phase==='settled'?reallocate:run} disabled={phase==='running'}>{phase==='running'?<RotateCcw className="spin"/>:<Bolt/>}{phase==='running'?' Agents are competing':phase==='settled'?' Run next allocation':' Run flagship market'}</button></header>
- {error&&<div className="error-banner">Integration failed visibly: {error}. Start the backend or use Docker Compose.</div>}
+ const [opportunity,setOpportunity]=useState<Opportunity|null>(null)
+ const [metrics,setMetrics]=useState<Metrics|null>(null)
+ const [providers,setProviders]=useState<Provider[]>([])
+ const [audit,setAudit]=useState<AuditEvent[]>([])
+ const [history,setHistory]=useState<AllocationHistory[]>([])
+ const [receipt,setReceipt]=useState<Receipt|null>(null)
+ const [database,setDatabase]=useState<'sqlite'|'supabase-postgres'|null>(null)
+ const [phase,setPhase]=useState<Phase>('idle')
+ const [error,setError]=useState('')
+ const [failedAction,setFailedAction]=useState<'run'|'settle'|'reallocate'>('run')
+ const offers=opportunity?.match?.ranked_offers||[]
+ const winner=offers.find(x=>x.offer.id===opportunity?.match?.recommended_offer_id&&x.eligible)
+ const offeredRates=offers.filter(x=>x.offer.status==='OFFER'&&x.offer.annual_rate!==null).map(x=>x.offer.annual_rate as number)
+ const lowestRate=offeredRates.length?Math.min(...offeredRates):Number.NaN
+ const busy=phase==='loading'||phase==='settling'||phase==='rerunning'
+ const activeStep={idle:0,loading:3,ready:6,settling:7,settled:8,rerunning:4,completed:9,error:0}[phase]
+
+ const refresh=async()=>{
+  const [nextMetrics,nextProviders,nextAudit,health]=await Promise.all([api.metrics(),api.providers(),api.audit(),api.health()])
+  setMetrics(nextMetrics);setProviders(nextProviders);setAudit(nextAudit);setDatabase(health.database)
+  return nextProviders
+ }
+ const run=async()=>{
+  setError('');setPhase('loading');setOpportunity(null);setMetrics(null);setProviders([]);setAudit([]);setHistory([]);setReceipt(null);setDatabase(null)
+  try{
+   await api.reset()
+   const scenarios=await api.scenarios()
+   const created=await api.create(scenarios.urgent)
+   const result=await api.run(created.id)
+   setOpportunity(result);await refresh();setPhase('ready')
+  }catch(e){setFailedAction('run');setError(e instanceof Error?e.message:'Market failed');setPhase('error')}
+ }
+ const settle=async()=>{
+  if(!opportunity||!winner||phase!=='ready')return
+  setError('');setPhase('settling')
+  try{
+   const before=providers.find(p=>p.id===winner.offer.provider_id)||(await api.providers()).find(p=>p.id===winner.offer.provider_id)
+   if(!before)throw new Error('Recommended provider state is unavailable')
+   const settlement=await api.settle(opportunity.id,winner.offer.id)
+   const afterProviders=await refresh()
+   const after=afterProviders.find(p=>p.id===winner.offer.provider_id)
+   if(!after)throw new Error('Updated provider state is unavailable')
+   setReceipt({settlement,before,after})
+   setHistory([{sequence:1,invoice:opportunity.invoice.invoice_number,provider:winner.offer.provider_name,rate:winner.offer.annual_rate,amount:winner.offer.financed_amount,liquidityBefore:before.available_liquidity,liquidityAfter:after.available_liquidity,exposureBefore:before.current_exposure,exposureAfter:after.current_exposure}])
+   setPhase('settled')
+  }catch(e){setFailedAction('settle');setError(e instanceof Error?e.message:'Settlement failed');setPhase('ready')}
+ }
+ const reallocate=async()=>{
+  if(phase!=='settled')return
+  setError('');setPhase('rerunning')
+  try{
+   const scenarios=await api.scenarios()
+   const created=await api.create(scenarios.strong)
+   const result=await api.run(created.id)
+   const nextWinner=result.match?.ranked_offers.find(x=>x.offer.id===result.match?.recommended_offer_id&&x.eligible)
+   setOpportunity(result);await refresh()
+   if(nextWinner)setHistory(previous=>[...previous,{sequence:2,invoice:result.invoice.invoice_number,provider:nextWinner.offer.provider_name,rate:nextWinner.offer.annual_rate,amount:nextWinner.offer.financed_amount}])
+   setPhase('completed')
+  }catch(e){setFailedAction('reallocate');setError(e instanceof Error?e.message:'Reallocation failed');setPhase('settled')}
+ }
+ const primaryAction=phase==='settled'?reallocate:run
+ const retryAction=failedAction==='settle'?settle:failedAction==='reallocate'?reallocate:run
+ const primaryLabel=phase==='loading'?'Agents are competing':phase==='settling'?'Settlement in progress':phase==='rerunning'?'Reallocating capital':phase==='settled'?'Run next allocation':phase==='completed'?'Restart flagship demo':'Run flagship market'
+ const agentLatency=useMemo(()=>busy?'clearing now…':opportunity?'backend decision received':'waiting for first allocation',[busy,opportunity])
+ const invoice=opportunity?.invoice
+ const req=opportunity?.requirements
+ const risk=opportunity?.evaluation?.risk
+ const verification=opportunity?.evaluation?.verification
+
+ return <div className="shell"><aside className="rail"><div className="brand"><span>P</span><div>PRATIN<small>CAPITAL NETWORK</small></div></div><nav><button className="active"><Gauge/>Market pulse</button><button><Radar/>Opportunities</button><button><Landmark/>Capital agents</button><button><ShieldCheck/>Risk ledger</button></nav><div className="rail-foot"><span className="live-dot"/> MARKET READY<small>Synthetic demo • No real funds</small></div></aside>
+ <main><header><div><p className="eyebrow">CONTINUOUS CLEARING • STATEFUL DEMO MARKET</p><h1>Capital, intelligently <em>allocated.</em></h1><p className="lede">Every verified invoice enters a competitive market where autonomous providers price risk, protect portfolios and race to satisfy the supplier.</p></div><button className="primary" onClick={primaryAction} disabled={busy}>{busy?<RotateCcw className="spin"/>:<Bolt/>}{primaryLabel}</button></header>
+ {error&&<div className="error-banner" role="alert"><strong>Request failed.</strong> {error} <button onClick={retryAction} disabled={busy}>Retry safely</button></div>}
+ <section className="provenance" aria-label="Integration provenance"><div><small>INVOICE / RISK AGENT</small><span className={provenanceClass(opportunity?.integration_status.invoice_risk)}>● {provenanceLabel(opportunity?.integration_status.invoice_risk)}</span></div><div><small>CAPITAL MARKET AGENTS</small><span className={provenanceClass(opportunity?.integration_status.capital_market)}>● {provenanceLabel(opportunity?.integration_status.capital_market)}</span></div><div><small>MARKET STATE</small><span className={database==='supabase-postgres'?'service':database?'fixture':'unavailable'}>● {database==='supabase-postgres'?'SUPABASE POSTGRES':database==='sqlite'?'SQLITE OFFLINE':'UNAVAILABLE'}</span></div><p>{!opportunity?'No market response received yet.':Object.values(opportunity.integration_status).includes('DEGRADED_FIXTURE')?'A service was unavailable; deterministic fixtures are clearly shown.':Object.values(opportunity.integration_status).every(x=>x==='SERVICE')?'Both responses came through validated HTTP service contracts.':'Deterministic fixture mode is active; these are not external service responses.'}</p></section>
  <section className="ticker">{lifecycle.map((x,i)=><div key={x} className={i<activeStep?'done':i===activeStep?'now':''}><span>{i<activeStep?'✓':i+1}</span>{x}{i<lifecycle.length-1&&<ArrowRight/>}</div>)}</section>
- <section className="metrics"><article><small>DEPLOYABLE CAPITAL</small><strong>{money(metrics.available_liquidity)}</strong><p><i>{phase==='settled'?'UPDATED':'LIVE'}</i> across 4 providers</p></article><article><small>ACTIVE OPPORTUNITIES</small><strong>{metrics.active_opportunities}</strong><p><i>{metrics.settlements}</i> settled autonomously</p></article><article><small>OFFERS GENERATED</small><strong>{metrics.offers_generated}</strong><p><i>{Math.round(metrics.provider_participation_rate*100)}%</i> provider participation</p></article><article><small>CAPITAL ALLOCATED</small><strong>{money(metrics.financing_allocated)}</strong><p><i>{phase==='settled'?'JUST NOW':'18h'}</i> funding signal</p></article></section>
- <div className="section-head"><div><p className="eyebrow">{phase==='settled'?'SETTLED & REALLOCATED':'LIVE MARKET'} • {opportunity?.id||'OPP-7A91C'}</p><h2>{invoice.supplier_name} seeks {money(req.minimum_amount)} within {req.max_settlement_hours} hours</h2></div><div className="risk"><span>{risk.band} RISK</span><b>{risk.score}</b><small>/100</small></div></div>
- <section className="market-grid"><article className="invoice-card"><div className="card-label"><BadgeCheck/> {verification.status} OPPORTUNITY</div><h3>{invoice.invoice_number}</h3><p>{invoice.buyer_name} → {invoice.supplier_name}</p><div className="invoice-total"><small>INVOICE VALUE</small><strong>{money(invoice.amount)}</strong></div><dl><div><dt>Minimum capital</dt><dd>{money(req.minimum_amount)}</dd></div><div><dt>Settlement ceiling</dt><dd>{req.max_settlement_hours} hours</dd></div><div><dt>Desired tenor</dt><dd>{req.desired_tenor_days} days</dd></div><div><dt>Verification confidence</dt><dd>{Math.round(verification.confidence*100)}%</dd></div></dl><footer><ShieldCheck/> Synthetic verification clearly labelled</footer></article>
- <div className="arena"><div className="arena-head"><div><Sparkles/> AGENT OFFER ARENA</div><span><i/> {agentLatency}</span></div><div className="provider-list">{offers.map(r=>{const o=r.offer,isWinner=o.id===winner?.offer.id;return <article className={`provider ${isWinner?'winner':''}`} key={o.id}><div className="provider-title"><div className="provider-icon">{o.provider_type==='BANK'?<Building2/>:o.provider_type==='FINTECH'?<CircleDollarSign/>:<Landmark/>}</div><div><h3>{o.provider_name}</h3><small>{o.provider_type} AGENT • {o.status}</small></div>{isWinner&&<b>RECOMMENDED</b>}</div><div className="offer-stats"><div><small>RATE</small><strong>{o.annual_rate?`${o.annual_rate}%`:'—'}</strong></div><div><small>ADVANCE</small><strong>{o.financed_amount?money(o.financed_amount):'DECLINED'}</strong></div><div><small>SETTLE</small><strong>{o.settlement_hours?`${o.settlement_hours}h`:'—'}</strong></div></div>{r.hard_constraint_failures.length?<p className="fail">× {r.hard_constraint_failures.join(' • ')}</p>:<p className={isWinner?'pass':'neutral'}>{isWinner?'✓ Satisfies every hard constraint':`Rank #${r.rank}`} • {r.suitability_score}/100 suitability</p>}</article>})}</div></div></section>
- <section className="decision"><div><p className="eyebrow">{phase==='settled'||phase==='reallocated'?'MARKET STATE UPDATED':'EXPLAINABLE CLEARING DECISION'}</p><h2>{phase==='settled'?`${winnerName} liquidity decreased. Run the next allocation.`:phase==='reallocated'?`${winnerName} now wins after VegaFlow capacity changed.`:`${winnerName} wins on total suitability, `}<span>{phase==='settled'?' Dynamic reallocation is armed.':phase==='reallocated'?' The market adapted.':'not headline rate.'}</span></h2><p>{opportunity?.match?.recommendation_reasons.join(' ')||'Astra’s lower rate looks cheapest—but it cannot deliver enough capital in time. The recommended agent satisfies the full supplier mandate while operating inside its own liquidity, risk and portfolio constraints.'}</p></div><div className="score-ring"><strong>{winner?.suitability_score||91}</strong><small>SUITABILITY</small></div>{phase!=='settled'&&phase!=='reallocated'&&<button className="settle" onClick={settle} disabled={!opportunity}>Accept & simulate settlement <ArrowRight/></button>}</section>
- </main></div>}
+ <section className="metrics"><article><small>DEPLOYABLE CAPITAL</small><strong>{metrics?money(metrics.available_liquidity):'—'}</strong><p>{metrics?'Backend marketplace state':'Available after first market run'}</p></article><article><small>ACTIVE OPPORTUNITIES</small><strong>{metrics?.active_opportunities??'—'}</strong><p>{metrics?`${metrics.settlements} simulated settlements`:'No backend metrics loaded'}</p></article><article><small>OFFERS GENERATED</small><strong>{metrics?.offers_generated??'—'}</strong><p>{metrics?`${Math.round(metrics.provider_participation_rate*100)}% provider participation`:'No fabricated offer totals'}</p></article><article><small>CAPITAL ALLOCATED</small><strong>{metrics?money(metrics.financing_allocated):'—'}</strong><p>{metrics?'Derived from settlement ledger':'Waiting for settlement'}</p></article></section>
+
+ {!opportunity?<section className="empty-market"><Sparkles/><div><p className="eyebrow">MARKETPLACE READY</p><h2>No allocation has run yet.</h2><p>Select <strong>Run flagship market</strong> to request real backend verification, provider offers and a recommendation. No preview decision is being presented as live data.</p></div></section>:<>
+ <div className="section-head"><div><p className="eyebrow">{phase==='completed'?'SECOND ALLOCATION':'BACKEND MARKET'} • {opportunity.id}</p><h2>{invoice?.supplier_name} seeks {money(req?.minimum_amount||0)} within {req?.max_settlement_hours} hours</h2></div><div className="risk"><span>{risk?.band} RISK</span><b>{risk?.score}</b><small>/100</small></div></div>
+ <section className="market-grid"><article className="invoice-card"><div className="card-label"><BadgeCheck/> {verification?.status} OPPORTUNITY</div><h3>{invoice?.invoice_number}</h3><p>{invoice?.buyer_name} → {invoice?.supplier_name}</p><div className="invoice-total"><small>INVOICE VALUE</small><strong>{money(invoice?.amount||0)}</strong></div><dl><div><dt>Minimum capital</dt><dd>{money(req?.minimum_amount||0)}</dd></div><div><dt>Settlement ceiling</dt><dd>{req?.max_settlement_hours} hours</dd></div><div><dt>Desired tenor</dt><dd>{req?.desired_tenor_days} days</dd></div><div><dt>Verification confidence</dt><dd>{Math.round((verification?.confidence||0)*100)}%</dd></div></dl><footer><ShieldCheck/> Synthetic verification clearly labelled</footer></article>
+ <div className="arena"><div className="arena-head"><div><Sparkles/> AGENT OFFER ARENA</div><span><i/> {agentLatency}</span></div><div className="provider-list">{offers.map(r=><ProviderOffer key={r.offer.id} ranked={r} winnerId={winner?.offer.id} lowestRate={lowestRate}/>)}</div></div></section>
+ <section className="decision"><div><p className="eyebrow">{phase==='completed'?'ADAPTIVE REALLOCATION COMPLETE':receipt?'MARKET STATE UPDATED':'EXPLAINABLE BACKEND DECISION'}</p><h2>{winner?`${winner.offer.provider_name} ${phase==='completed'?'wins allocation two after provider state changed.':'wins on complete suitability.'}`:'No provider currently satisfies every mandate.'}</h2><p>{opportunity.match?.recommendation_reasons.join(' ')}</p></div>{winner&&<div className="score-ring"><strong>{winner.suitability_score}</strong><small>SUITABILITY</small></div>}{phase==='ready'&&winner&&<button className="settle" onClick={settle} disabled={busy}>Accept & simulate settlement <ArrowRight/></button>}</section>
+ </>}
+
+ {receipt&&<section className="settlement-proof"><div><p className="eyebrow">SIMULATED SETTLEMENT • {receipt.settlement.id}</p><h2>One atomic write changed the next market.</h2><p>{receipt.settlement.notice}</p></div><dl><div><dt>Provider liquidity</dt><dd>{money(receipt.before.available_liquidity)} <ArrowRight/> <strong>{money(receipt.after.available_liquidity)}</strong></dd></div><div><dt>Provider exposure</dt><dd>{money(receipt.before.current_exposure)} <ArrowRight/> <strong>{money(receipt.after.current_exposure)}</strong></dd></div></dl></section>}
+ {history.length>0&&<section className="allocation-history"><p className="eyebrow">CAUSAL ALLOCATION HISTORY</p><div className="history-flow">{history.map((item,index)=><div key={item.sequence} className="history-item"><small>ALLOCATION {item.sequence}</small><strong>{item.provider}</strong><span>{item.invoice} • {item.amount?money(item.amount):'—'} • {item.rate??'—'}%</span>{item.liquidityBefore!==undefined&&<em>Liquidity {money(item.liquidityBefore)} → {money(item.liquidityAfter||0)}</em>}{index<history.length-1&&<ArrowRight/>}</div>)}</div>{history.length===1&&phase==='settled'&&<p className="history-hint">Provider liquidity and exposure changed. Run the next allocation to see the market adapt.</p>}{history.length===2&&<p className="history-hint success">VegaFlow → state mutation → Meridian. The second winner changed because settlement changed provider capacity.</p>}</section>}
+ {audit.length>0&&<section className="audit-timeline"><p className="eyebrow">RECENT BACKEND AUDIT EVENTS</p>{audit.slice(0,4).map(event=><div key={event.id}><span>{event.event_type.replaceAll('_',' ')}</span><p>{event.detail}</p><small>{event.id}</small></div>)}</section>}
+ </main></div>
+}
+
+function ProviderOffer({ranked,winnerId,lowestRate}:{ranked:RankedOffer;winnerId?:string;lowestRate:number}){
+ const o=ranked.offer,isWinner=o.id===winnerId,isLowest=o.annual_rate===lowestRate
+ return <article className={`provider ${isWinner?'winner':''} ${!ranked.eligible?'ineligible':''}`}><div className="provider-title"><div className="provider-icon">{o.provider_type==='BANK'?<Building2/>:o.provider_type==='FINTECH'?<CircleDollarSign/>:<Landmark/>}</div><div><h3>{o.provider_name}</h3><small>{o.provider_type} AGENT • {o.status}</small></div><div className="offer-badges">{isLowest&&<b className="lowest">LOWEST RATE</b>}{isWinner&&<b>RECOMMENDED</b>}{!ranked.eligible&&<b className="bad">INELIGIBLE</b>}</div></div><div className="offer-stats"><div><small>RATE</small><strong>{o.annual_rate!==null?`${o.annual_rate}%`:'—'}</strong></div><div><small>ADVANCE</small><strong>{o.financed_amount?money(o.financed_amount):'DECLINED'}</strong></div><div><small>SETTLE</small><strong>{o.settlement_hours?`${o.settlement_hours}h`:'—'}</strong></div></div>{ranked.hard_constraint_failures.length?<p className="fail">× {ranked.hard_constraint_failures.join(' • ')}</p>:<p className={isWinner?'pass':'neutral'}>{isWinner?'✓ Satisfies every supplier hard constraint':`Rank #${ranked.rank}`} • {ranked.suitability_score}/100 suitability</p>}<details><summary>Why this offer?</summary>{o.reasons.length>0&&<ul>{o.reasons.map(reason=><li key={reason}>{reason}</li>)}</ul>}{ranked.hard_constraint_failures.map(failure=><p className="factor-failure" key={failure}>Hard gate: {failure}</p>)}{ranked.factors.map(factor=><div className="factor" key={factor.name}><div><strong>{factor.name}</strong><span>{factor.score.toFixed(1)} × {Math.round(factor.weight*100)}% = {(factor.score*factor.weight).toFixed(1)}</span></div><p>{factor.explanation}</p></div>)}</details></article>
+}
