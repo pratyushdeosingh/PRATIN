@@ -61,6 +61,7 @@ class FinancingRequirements(StrictModel):
     max_settlement_hours: int = Field(gt=0, le=720)
     desired_tenor_days: int = Field(gt=0, le=365)
     max_total_cost: float | None = Field(default=None, gt=0)
+    priority: Literal["BALANCED", "FASTEST", "LOWEST_FEE", "HIGHEST_ADVANCE"] = "BALANCED"
 
 
 class OpportunityCreate(StrictModel):
@@ -118,12 +119,46 @@ class RiskFactor(StrictModel):
     reason_code: str | None = None
 
 
+class RiskDecisionSummary(StrictModel):
+    score: float
+    band: RiskBand
+    primary_drivers: list[str] = []
+    risk_contributors: list[str] = []
+    top_risk_contributors: list[RiskFactor] = []
+    top_risk_reducers: list[RiskFactor] = []
+    human_readable_explanation: str
+
+
+class RiskSimulationRequest(StrictModel):
+    scenario_name: str | None = None
+    simulate_duplicate: bool | None = None
+    simulated_on_time_payment_ratio: float | None = Field(default=None, ge=0, le=1)
+    simulated_days_until_due: int | None = None
+    simulated_amount: float | None = Field(default=None, gt=0)
+    simulated_verification_status: VerificationStatus | None = None
+    simulated_buyer_rating: float | None = Field(default=None, ge=0, le=1)
+    simulated_supplier_history_months: int | None = Field(default=None, ge=0)
+    simulated_prior_defaults: int | None = Field(default=None, ge=0)
+
+
+class RiskSimulationResult(StrictModel):
+    scenario_name: str
+    original_score: float
+    original_band: RiskBand
+    simulated_score: float
+    simulated_band: RiskBand
+    score_delta: float
+    explanation: str
+    modified_factors: list[RiskFactor] = []
+
+
 class RiskAssessment(StrictModel):
     score: float = Field(ge=0, le=100, description="Higher means greater risk")
     band: RiskBand
     confidence: float = Field(ge=0, le=1)
     factors: list[RiskFactor]
     missing_information: list[str]
+    summary: RiskDecisionSummary | None = None
     policy_version: str = "risk-policy-1.0-demo"
 
 
@@ -257,6 +292,8 @@ class MatchDecision(StrictModel):
     recommended_offer_id: str | None
     ranked_offers: list[RankedOffer]
     recommendation_reasons: list[str]
+    tradeoffs: list[str] = []
+    priority: str = "BALANCED"
     policy_version: str = "matching-policy-1.1-demo"
     policy_notice: str = "Prototype policy weights are explainable demonstration parameters, not production-calibrated financial advice."
 

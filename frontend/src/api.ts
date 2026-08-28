@@ -45,6 +45,10 @@ export const api={
  strategy:(body:Record<string,unknown>)=>request<any>('/api/simulations/strategy',{method:'POST',body:JSON.stringify(body)}),
  stress:(opportunityId:string)=>request<any>(`/api/simulations/stress/${opportunityId}`,{method:'POST'}),
  intelligence:()=>request<any>('/api/market/intelligence'),
+ opportunity:(id:string)=>request<Opportunity>(`/api/opportunities/${id}`),
+ whatIfScenarios:(id:string)=>request<RiskSimulationResult[]>(`/api/risk-ledger/${id}/what-if-scenarios`),
+ simulateRisk:(id:string,req:RiskSimulationRequest)=>request<RiskSimulationResult>(`/api/risk-ledger/${id}/simulate`,{method:'POST',body:JSON.stringify(req)}),
+ simulateInvoiceRisk:(payload:{invoice:any;verification:any;simulation:RiskSimulationRequest})=>request<RiskSimulationResult>('/api/invoices/simulate-risk',{method:'POST',body:JSON.stringify(payload)}),
  parseInvoicePdf:async(file:File):Promise<InvoiceParseResponse>=>{
   const formData=new FormData()
   formData.append('file',file)
