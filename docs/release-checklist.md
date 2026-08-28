@@ -1,19 +1,36 @@
 # Release checklist
 
-- [ ] No real customer data, credentials or fund movement.
-- [ ] `.env.example` matches runtime configuration.
-- [ ] Python tests, frontend tests and production build pass.
-- [ ] Required-mode services are healthy on 8000/8001/8002.
+- [x] No real customer data, credentials or fund movement.
+  - Evidence: repository secret/marker scan found only synthetic fixtures and documented placeholders; settlement contracts and UI explicitly say no real funds move; `.env` is ignored and excluded from Docker context.
+- [x] `.env.example` matches runtime configuration.
+  - Evidence: every variable maps to `backend/app/config.py`, `frontend/src/api.ts`, or `docker-compose.yml`; the database URL is server-only and no `VITE_*` database variable exists.
+- [x] Python tests, frontend tests and production build pass.
+  - Evidence: local release run: `40 passed, 6 skipped` (the six require Postgres), all `6` Postgres-specific tests passed separately, `8 passed` in Vitest, and a successful Vite production build. Postgres-only cases are also wired into the database-backed CI job.
+- [x] Required-mode services are healthy on 8000/8001/8002.
+  - Evidence: local health checks returned HTTP 200 and `python -m backend.app.integration_check` passed with both integration provenance values equal to `SERVICE`.
 - [ ] Core health and cockpit show `SUPABASE POSTGRES`; no database secret reaches the frontend.
+  - Evidence: secret boundary, frontend label, and Postgres health assertion are covered by code/tests; this machine ran the cockpit against `SQLITE OFFLINE`, so the primary Supabase runtime label was not reverified here.
 - [ ] Supabase migration `20260828091405_create_pratin_marketplace` is applied and advisors reviewed.
+  - Evidence: the migration applied successfully to disposable Postgres 17; catalog tests confirmed RLS on all four tables and no schema/table access for `anon` or `authenticated`. No actual Supabase project or advisor connection was available for this release run.
 - [ ] Docker Compose starts from a clean checkout.
-- [ ] Flagship invoice verifies and produces multiple distinct responses.
-- [ ] Astra’s lowest-rate offer fails visible hard constraints.
-- [ ] VegaFlow is recommended with factor-level reasons.
-- [ ] Duplicate acceptance returns the original settlement and no second capital mutation occurs.
-- [ ] Liquidity/exposure, metrics, settlement history and audit update.
-- [ ] Second scenario recommends a different provider after changed liquidity.
-- [ ] Fixture/degraded provenance is visible and never described as live service output.
-- [ ] Mobile and 1366×768 layouts remain usable.
-- [ ] README links, API docs and two-minute script are current.
+  - Evidence: `compose config --quiet`, a full `build --no-cache`, `up --wait`, all four ports, the required-mode integration, and restart persistence passed. Existing volume deletion (`down -v`) was not authorized by the execution safety gate, so a truly clean-volume start remains unverified.
+- [x] Flagship invoice verifies and produces multiple distinct responses.
+  - Evidence: live required-mode run returned four differentiated provider results.
+- [x] Astra’s lowest-rate offer fails visible hard constraints.
+  - Evidence: live response and rendered cockpit showed 8.22%, ₹700,000 versus ₹800,000 required, and 96h versus 48h allowed.
+- [x] VegaFlow is recommended with factor-level reasons.
+  - Evidence: live backend recommendation was VegaFlow NBFC; rendered factor detail showed the canonical 28/32/16/8/8/8 weights and explanations.
+- [x] Duplicate acceptance returns the original settlement and no second capital mutation occurs.
+  - Evidence: live replay returned the same settlement ID; SQLite concurrency/rollback tests and all Postgres parity tests passed locally, and the Postgres suite is wired into the database-backed CI job.
+- [x] Liquidity/exposure, metrics, settlement history and audit update.
+  - Evidence: live state changed from ₹1,650,000 to ₹780,000 liquidity and ₹1,300,000 to ₹2,170,000 exposure; rendered receipt, history, metrics and audit updated.
+- [x] Second scenario recommends a different provider after changed liquidity.
+  - Evidence: live integration and rendered demo both produced Meridian Yield Fund after VegaFlow settlement.
+- [x] Fixture/degraded provenance is visible and never described as live service output.
+  - Evidence: required, fixture, auto-degraded and required-unavailable modes were separately exercised; frontend tests verify the labels and wording.
+- [x] Mobile and 1366×768 layouts remain usable.
+  - Evidence: browser QA at 390×844, 1366×768 and 1920×1080 completed the demo without horizontal overflow; mobile navigation remains visible and all four views are reachable.
+- [x] README links, API docs and two-minute script are current.
+  - Evidence: local README document links resolve, all three `/docs` endpoints returned HTTP 200, policy/test counts and request-driven reallocation wording were audited.
 - [ ] Collaborator branches pass CI and merge through reviewed PRs.
+  - Evidence: GitHub shows merged PRs for Pratham, Nitin and Pratyush with successful CI. GitHub returned no approving review decision, so the “reviewed” portion is not verified.

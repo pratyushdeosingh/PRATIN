@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +12,15 @@ from .services import IntegrationClient
 from .store_factory import create_store
 
 settings = Settings(); store = create_store(settings); integrations = IntegrationClient(settings)
-app = FastAPI(title="PRATIN Capital Allocation Engine", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    close = getattr(store, "close", None)
+    if close:
+        close()
+
+app = FastAPI(title="PRATIN Capital Allocation Engine", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -55,7 +64,10 @@ async def clear_market(item_id: str) -> OpportunityRecord:
                            {provider.id: provider.available_liquidity for provider in providers})
     item = item.model_copy(update={"status": "MARKET_RUN", "evaluation": evaluation, "offers": market.offers,
         "match": decision, "integration_status": {"invoice_risk": risk_status, "capital_market": market_status}})
-    store.save_opportunity(item)
+    try:
+        store.save_opportunity(item)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     store.audit("RISK_EVALUATED", f"Invoice {item.invoice.invoice_number} verified ({evaluation.verification.status.value}) with {evaluation.risk.band.value} risk score {evaluation.risk.score}/100.", item.id)
     store.audit("MARKET_CLEARED", f"{len(market.offers)} providers evaluated; recommendation {decision.recommended_offer_id or 'none'}.", item.id)
     return item

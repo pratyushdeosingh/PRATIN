@@ -49,8 +49,20 @@ class Store:
             db.executemany("INSERT INTO providers VALUES (?, ?)", [(p.id, p.model_dump_json()) for p in fixture_providers()])
 
     def save_opportunity(self, item: OpportunityRecord):
-        with self.connect() as db:
-            db.execute("INSERT OR REPLACE INTO opportunities VALUES (?, ?)", (item.id, item.model_dump_json()))
+        with self.lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT payload FROM opportunities WHERE id=?", (item.id,)
+            ).fetchone()
+            if existing:
+                current = OpportunityRecord.model_validate_json(existing[0])
+                if current.status == "SETTLED" and item.status != "SETTLED":
+                    raise ValueError("Settled opportunities cannot be overwritten by a stale market run")
+            db.execute(
+                """INSERT INTO opportunities (id, payload) VALUES (?, ?)
+                   ON CONFLICT(id) DO UPDATE SET payload=excluded.payload""",
+                (item.id, item.model_dump_json()),
+            )
 
     def get_opportunity(self, item_id: str) -> OpportunityRecord | None:
         with self.connect() as db: row = db.execute("SELECT payload FROM opportunities WHERE id=?", (item_id,)).fetchone()

@@ -89,3 +89,7 @@ jobs:
           done
 
           PRATIN_EXPECTED_DATABASE=supabase-postgres python -m backend.app.integration_check
+      - name: Verify Postgres settlement parity
+        env:
+          PRATIN_TEST_POSTGRES_URL: ${{ env.SUPABASE_DATABASE_URL }}
+        run: python -m pytest -q backend/tests/test_postgres_settlement.py
