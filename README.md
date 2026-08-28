@@ -69,7 +69,7 @@ For a completely offline, deterministic presentation set `PRATIN_INTEGRATION_MOD
 
 ### Supabase persistence
 
-The deployed backend uses a private Supabase Postgres schema. Apply `supabase/migrations/20260828091405_create_pratin_marketplace.sql`, then configure the **core backend only**:
+The primary demo configuration uses a private Supabase Postgres schema. Apply `supabase/migrations/20260828091405_create_pratin_marketplace.sql`, then configure the **core backend only**:
 
 ```powershell
 $env:PRATIN_DATABASE_BACKEND="supabase"
@@ -104,7 +104,7 @@ corepack pnpm --dir frontend test
 corepack pnpm --dir frontend run build
 ```
 
-Current baseline: **32 Python tests**, **6 frontend tests**, and the production build pass. Coverage includes uncertainty, provider differentiation, risk appetite, strict integration failures, deterministic ranking, “lowest rate loses,” atomic settlement rollback, idempotent replay, stale provider state, Supabase configuration safety, liquidity mutation, visible provenance, cockpit failure states and retained reallocation history.
+Current baseline: **40 environment-independent Python tests**, **6 additional Postgres settlement/security tests in the database-backed CI job**, **8 frontend tests**, and the production build pass. Coverage includes uncertainty, provider differentiation, risk appetite, strict integration failures, deterministic ranking, “lowest rate loses,” atomic settlement rollback, idempotent replay, stale provider and orchestration state, Supabase configuration safety, liquidity mutation, visible provenance, cockpit failure states and retained reallocation history.
 
 With all three Python services running in `required` mode, `python -m backend.app.integration_check` verifies the live HTTP path and asserts that the second invoice moves to a different provider.
 

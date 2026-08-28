@@ -1,8 +1,8 @@
 # Architecture
 
-PRATIN implements the official continuous allocation loop:
+PRATIN implements a request-driven allocation loop:
 
-`Invoice → Verify → Assess Risk → Discover Capital → Generate Offers → Compare → Match → Finance → Settle → Learn / Reallocate`
+`Invoice → Verify → Assess Risk → Discover Capital → Generate Offers → Compare → Match → Finance → Settle → Stateful reallocation`
 
 ## Boundaries
 
@@ -11,7 +11,7 @@ PRATIN implements the official continuous allocation loop:
 - **Core:** owns opportunity lifecycle, integration policy, response validation, hard constraints, ranking, settlement, persistence, metrics and audit.
 - **Cockpit:** displays backend decisions and sends commands; it never computes the authoritative ranking.
 
-Supabase Postgres is the deployed durable store for opportunities, provider state, settlements and audit events. The backend connects server-side to a private `pratin` schema; browser roles have no schema access and the database URL is never exposed to React. Settlement locks the opportunity and provider rows and commits provider liquidity/exposure, opportunity status, settlement and audit event in one PostgreSQL transaction. Replaying the same acceptance returns the original settlement without mutating capital twice. A stale recommendation is rejected if current liquidity, exposure, capacity or concentration can no longer support it.
+Supabase Postgres is the primary durable-store configuration for opportunities, provider state, settlements and audit events. The backend connects server-side to a private `pratin` schema; browser roles have no schema access and the database URL is never exposed to React. Settlement locks the opportunity and provider rows and commits provider liquidity/exposure, opportunity status, settlement and audit event in one PostgreSQL transaction. Replaying the same acceptance returns the original settlement without mutating capital twice. A stale recommendation is rejected if current liquidity, exposure, capacity or concentration can no longer support it.
 
 SQLite implements the same store contract only for deterministic offline demos and unit tests. The cockpit exposes which backend is active, so SQLite is never presented as Supabase persistence.
 
