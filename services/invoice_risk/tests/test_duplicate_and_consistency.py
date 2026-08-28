@@ -98,6 +98,22 @@ def test_different_supplier_same_invoice_number_not_duplicate():
     assert res.duplicate_detected is False
 
 
+def test_different_buyer_same_invoice_number_not_duplicate():
+    inv1 = create_base_invoice(invoice_number="INV-COMMON-100", buyer_name="Buyer Alpha")
+    inv2 = create_base_invoice(invoice_number="INV-COMMON-100", buyer_name="Buyer Beta")
+
+    res = check_duplicate_invoice(inv2, existing_invoices=[inv1])
+    assert res.duplicate_detected is False
+
+
+def test_different_amount_same_invoice_number_not_duplicate():
+    inv1 = create_base_invoice(invoice_number="INV-AMT-100", amount=500_000.0)
+    inv2 = create_base_invoice(invoice_number="INV-AMT-100", amount=600_000.0)
+
+    res = check_duplicate_invoice(inv2, existing_invoices=[inv1])
+    assert res.duplicate_detected is False
+
+
 def test_different_invoice_number_same_parties_not_duplicate():
     inv1 = create_base_invoice(invoice_number="INV-001", supplier_name="Supplier Alpha", buyer_name="Buyer X", amount=100000.0)
     inv2 = create_base_invoice(invoice_number="INV-002", supplier_name="Supplier Alpha", buyer_name="Buyer X", amount=100000.0)
