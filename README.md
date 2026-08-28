@@ -1,51 +1,68 @@
 # PRATIN — Procurement Receivables & Agentic Trade Invoice Network
 
-> **A competitive capital-allocation market for supply-chain working capital.**
+> From trade-invoice PDF to an explainable, stateful financing market.
 
-PRATIN turns a verified invoice into a financing opportunity evaluated by autonomous capital-provider agents with different liquidity, risk appetites, expected returns, sector preferences and portfolio constraints. Competing offers are filtered against supplier hard requirements and ranked on total suitability—not headline interest alone—before simulated settlement changes the next market outcome.
+PRATIN is a full-stack demonstration of supply-chain working-capital financing. It accepts a structured invoice or an invoice PDF, performs deterministic synthetic verification and risk evaluation, asks autonomous capital providers to price and constrain the opportunity, then ranks the eligible offers. Accepting an offer simulates an atomic settlement that changes provider liquidity and exposure—so the next allocation can have a different winner.
 
-**The hackathon moment:** Astra Bank advertises the lowest rate, but cannot advance the required ₹8 lakh or settle within 48 hours. VegaFlow NBFC wins because it satisfies the complete mandate. Its liquidity then falls, and the next invoice clears to a different provider.
+> **Important:** all invoices, verification, risk decisions, offers, persistence, and settlement are synthetic. PRATIN does not perform real underwriting, GST/KYC checks, credit decisions, financial advice, or fund movement.
 
-> All data, verification and settlement are synthetic. No real underwriting, GST/KYC verification, financial advice or fund movement occurs.
+## Why PRATIN
 
-## Why this is not a loan comparison site
-
-PRATIN is stateful and two-sided. Supplier constraints are hard gates; providers independently decide whether to participate; risk-adjusted return and portfolio capacity affect their actions; every score has factor-level reasons; and accepting an offer mutates provider liquidity/exposure. The next ranking therefore changes.
+- **PDF invoice intake** — validates a PDF (up to 10 MB), extracts embedded text in memory, shows extracted fields/confidence/missing data, and writes a durable ledger entry.
+- **Explainable risk** — deterministic verification, uncertainty labels, reason codes, and factor-level risk decisions.
+- **Autonomous providers** — each agent runs `OBSERVE → EVALUATE → CONSTRAIN → DECIDE → PRICE → EXPLAIN → ACT` according to its own liquidity, risk appetite, sector fit, ticket size, and portfolio cap.
+- **Hard constraints first** — lowest rate does not win if it cannot meet the amount, timing, cost, or policy requirements.
+- **Stateful simulation** — settlement is atomic and replay-safe; changed provider state influences the following market.
+- **Truthful provenance** — live service, fixture, degraded fallback, and SQLite/Postgres state are labelled in the cockpit.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  I[Invoice + supplier mandate] --> R[Invoice / Risk Agent :8001]
-  R --> O[PRATIN Orchestrator :8000]
-  O --> C[Capital Provider Agents :8002]
-  C --> M[Hard gates + multi-objective match]
-  M --> S[Simulated settlement]
-  S --> DB[(Supabase Postgres market state + audit)]
-  DB --> O
+  PDF[Invoice PDF or structured invoice] --> R[Invoice & Risk Agent :8001]
+  R --> O[PRATIN Core / Orchestrator :8000]
+  O --> C[Capital Market Agents :8002]
+  C --> M[Hard gates + suitability match]
+  M --> S[Idempotent simulated settlement]
+  S <--> DB[(SQLite fallback or Supabase Postgres)]
   O --> UI[React Market Cockpit :5173]
 ```
 
-The browser talks only to the orchestrator. HTTP service responses are validated against strict shared Pydantic contracts. `required`, `auto` and `fixture` modes make live service provenance or degradation visible.
-
 | Component | Responsibility | Port |
 |---|---|---:|
-| PRATIN core | Orchestration, matching, Supabase/Postgres persistence, settlement, metrics, audit | 8000 |
-| Invoice & Risk Agent | Synthetic verification, uncertainty and explainable deterministic risk | 8001 |
-| Capital Market Agents | Discovery, provider constraints and differentiated offers | 8002 |
-| Market Cockpit | Live competition, explanations and reallocation demo | 5173 |
+| Core API | Orchestration, matching, persistence, settlement, audit, metrics, PDF admission | 8000 |
+| Invoice & Risk Agent | PDF extraction, synthetic verification, deterministic risk evaluation | 8001 |
+| Capital Market Agents | Provider analysis, pricing, offers, and agent reasoning | 8002 |
+| Market Cockpit | Responsive React demo UI | 5173 |
 
-## Demo startup
+The cockpit uses Core for marketplace actions. Its Capital Agents tab calls the capital-market service's local `/analysis` endpoint to render agent reasoning.
 
-Prerequisite: Docker Desktop / Docker Engine with Compose v2. For the final integrated presentation, set `PRATIN_DATABASE_BACKEND=supabase` and `SUPABASE_DATABASE_URL` in an uncommitted `.env`, then run:
+## Run with Docker
+
+Requires Docker Desktop (or Docker Engine) with Compose v2.
 
 ```bash
 docker compose up --build
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173), select **Run flagship market**, accept the recommendation, then select **Run next allocation**. API docs are available on ports 8000, 8001 and 8002 at `/docs`.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
-Without those Supabase variables, the same command deliberately starts the resilient SQLite offline fallback and labels it in the cockpit. Use that only as the presentation backup, not as proof of Supabase integration.
+The default Compose setup uses required HTTP integration between services and persistent SQLite state. API docs:
+
+- [Core docs](http://127.0.0.1:8000/docs)
+- [Invoice & Risk docs](http://127.0.0.1:8001/docs)
+- [Capital Market docs](http://127.0.0.1:8002/docs)
+
+### Optional Supabase Postgres
+
+Apply `supabase/migrations/20260828091405_create_pratin_marketplace.sql`, then create an uncommitted `.env`:
+
+```env
+PRATIN_DATABASE_BACKEND=supabase
+SUPABASE_DATABASE_URL=<server-only-pooled-or-direct-Postgres-URL>
+```
+
+Never commit this URL, expose it through `VITE_*`, or send it to the browser. Without it, PRATIN deliberately uses SQLite and shows that state in the UI.
 
 ## Local development
 
@@ -56,7 +73,7 @@ python -m pip install -r requirements.txt
 corepack pnpm --dir frontend install
 ```
 
-Start four terminals:
+Run each service in a separate terminal:
 
 ```powershell
 python -m uvicorn services.invoice_risk.app:app --port 8001
@@ -65,36 +82,34 @@ $env:PRATIN_INTEGRATION_MODE="required"; python -m uvicorn backend.app.main:app 
 corepack pnpm --dir frontend dev
 ```
 
-For a completely offline, deterministic presentation set `PRATIN_INTEGRATION_MODE=fixture`. `auto` prefers services and visibly reports `DEGRADED_FIXTURE` when it falls back.
+Use `PRATIN_INTEGRATION_MODE=fixture` for a fully deterministic in-process demo. `auto` prefers services and visibly labels fallback results `DEGRADED_FIXTURE`.
 
-### Supabase persistence
+## Presentation flow
 
-The primary demo configuration uses a private Supabase Postgres schema. Apply `supabase/migrations/20260828091405_create_pratin_marketplace.sql`, then configure the **core backend only**:
+1. In **Market pulse**, select **Run flagship market**.
+2. Inspect the offer explanations. Astra may quote lower pricing but cannot meet the supplier mandate; VegaFlow wins the complete request.
+3. Select **Accept & simulate settlement** to atomically update liquidity and exposure.
+4. Select **Run next allocation**. The updated market state changes the recommendation to Meridian.
+5. In **Risk ledger**, inspect durable evaluations or upload a text-based invoice PDF. The result shows fields, confidence, missing data, risk factors, provenance, and PDF filename.
+6. In **Capital agents**, inspect every provider's hard gates, attractiveness, pricing decomposition, terms, state, and reasons.
 
-```powershell
-$env:PRATIN_DATABASE_BACKEND="supabase"
-$env:SUPABASE_DATABASE_URL="<server-only pooled or direct Postgres URL>"
-```
-
-Get the URL from **Supabase Dashboard → Connect**. Never expose it through `VITE_*`, commit it, or send it to the browser. When the URL is absent, local development and tests use the explicit SQLite offline fallback; the cockpit labels that state `SQLITE OFFLINE` rather than implying Supabase is active.
-
-## API surface
+## API highlights
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST` | `/api/opportunities` | Admit an invoice and supplier mandate |
-| `POST` | `/api/opportunities/{id}/run-market` | Verify, assess risk, discover, offer and match |
+| `POST` | `/api/opportunities` | Admit a structured invoice and financing requirements |
+| `POST` | `/api/invoices/parse-pdf` | Validate, parse, evaluate, and persist an invoice PDF |
+| `POST` | `/api/opportunities/{id}/run-market` | Verify, assess risk, generate offers, and match |
 | `POST` | `/api/opportunities/{id}/accept/{offer_id}` | Idempotent simulated settlement |
-| `GET` | `/api/opportunities` | Durable opportunity history |
-| `GET` | `/api/providers` | Current liquidity and portfolio exposure |
-| `GET` | `/api/settlements` | Simulated settlement ledger |
-| `GET` | `/api/audit` | Explainable event trail |
-| `GET` | `/api/platform/metrics` | Data-derived marketplace metrics |
-| `POST` | `/api/demo/reset` | Restore deterministic synthetic state |
+| `GET` | `/api/opportunities` | Durable market history |
+| `GET` | `/api/risk-ledger` | Explainable evaluations, including PDF metadata |
+| `GET` | `/api/providers` | Current provider liquidity and exposure |
+| `GET` | `/api/audit` | Event trail |
+| `POST` | `:8002/analysis` | Detailed provider-agent reasoning |
 
-## Matching policy
+## PDF boundaries
 
-Offers first fail hard constraints: financing floor, settlement ceiling, supplier cost ceiling, risk appetite, liquidity, ticket size and portfolio concentration. Eligible offers are scored by the canonical `matching-policy-1.1-demo` weights in `backend/app/matching.py`: usable capital 28%, total effective cost 32%, settlement speed 16%, tenor 8%, provider risk-adjusted return 8% and remaining liquidity 8%. The weights sum to 100%; every component is returned to the UI with its score, weight, weighted contribution and backend explanation. These are demonstration policy parameters, not a production credit model.
+PDF parsing is intentionally bounded: only PDFs are accepted, files are limited to 10 MB, text is extracted in memory, and there is no OCR. Scanned/image-only or encrypted PDFs may return `PDF_TEXT_UNREADABLE`, `PDF_EMPTY`, or `PDF_INVALID`; PRATIN reports that result instead of fabricating fields.
 
 ## Verification
 
@@ -102,30 +117,26 @@ Offers first fail hard constraints: financing floor, settlement ceiling, supplie
 python -m pytest -q
 corepack pnpm --dir frontend test
 corepack pnpm --dir frontend run build
+python -m backend.app.integration_check
+docker compose config --quiet
 ```
 
-Current baseline: **40 environment-independent Python tests**, **6 additional Postgres settlement/security tests in the database-backed CI job**, **8 frontend tests**, and the production build pass. Coverage includes uncertainty, provider differentiation, risk appetite, strict integration failures, deterministic ranking, “lowest rate loses,” atomic settlement rollback, idempotent replay, stale provider and orchestration state, Supabase configuration safety, liquidity mutation, visible provenance, cockpit failure states and retained reallocation history.
-
-With all three Python services running in `required` mode, `python -m backend.app.integration_check` verifies the live HTTP path and asserts that the second invoice moves to a different provider.
+Current baseline: **80 passing Python tests**, **6 Postgres-only tests skipped unless `PRATIN_TEST_POSTGRES_URL` is configured**, and **8 passing frontend tests**. Coverage includes PDF validation/parsing, risk explanation, provider-agent constraints and pricing, matching, replay-safe settlement, rollback, stale-state protection, persistence selection, and the end-to-end two-allocation flow.
 
 ## Repository map
 
 ```text
-backend/                 Core API, integrations, matching, Supabase/Postgres + SQLite fallback
-contracts/               Strict shared Pydantic contracts
-services/invoice_risk/   Pratham-owned verification and risk agent
-services/capital_market/ Nitin-owned provider agents and offer generation
-frontend/                Pratyush-owned React market cockpit
-docs/                    Architecture, integration, demo, team and judge pack
-supabase/migrations/     Private marketplace schema tracked in Supabase migration history
-.github/workflows/       Deterministic CI
-docker-compose.yml       Health-checked four-service stack
+backend/                 Core FastAPI app, matching, persistence, settlement
+contracts/               Strict shared Pydantic models
+services/invoice_risk/   PDF parser, verification, deterministic risk engine
+services/capital_market/ Autonomous provider-agent pipeline and market regimes
+frontend/                React cockpit: Market pulse, Opportunities, Risk ledger, Capital agents
+supabase/migrations/     Marketplace schema migration
+docs/                    Architecture, demo script, integration and judging notes
 ```
 
-## Built vs future
+## Production roadmap
 
-**Built:** synthetic rule verification; uncertainty; deterministic risk; differentiated provider agents; two-sided constraints; total effective cost; explainable ranking; private Supabase Postgres persistence with SQLite offline fallback; atomic simulated settlement; audit; reallocation; fixture/auto/required modes; responsive market UI; tests; Docker; CI.
+PRATIN is a demonstrator, not a production finance platform. Real deployment requires regulated data/settlement integrations, KYC/KYB and e-invoice validation, fraud controls, RBAC, encryption and key management, observability, model governance, privacy controls, and legal/compliance review.
 
-**Future production work:** GST/e-invoice and KYC/KYB integrations, bureau/open-banking data, bank/NBFC APIs, event streaming, OIDC/RBAC, encryption and key management, fraud detection, digital signatures, regulated settlement rails, model governance, fairness monitoring, privacy controls and production-calibrated policies.
-
-PRATIN is named for Pratyush, Pratham and Nitin. See [the team guide](docs/team-start-here.md) and [the 2–3 minute demo](docs/demo-script.md).
+Named for Pratyush, Pratham, and Nitin. See the [team guide](docs/team-start-here.md), [architecture notes](docs/architecture.md), and [demo script](docs/demo-script.md).
