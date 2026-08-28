@@ -1,0 +1,104 @@
+{
+  "opportunity_id": "OPP-SAMPLE-001",
+  "invoice": {
+    "invoice_number": "INV-PRATIN-1001",
+    "supplier_name": "Shakti Components",
+    "buyer_name": "Orion Auto Systems",
+    "amount": 1000000,
+    "currency": "INR",
+    "issue_date": "2026-08-20",
+    "due_date": "2026-10-19",
+    "industry": "Manufacturing",
+    "gstin": "27ABCDE1234F1Z5",
+    "purchase_order_reference": "PO-2026-1188",
+    "buyer_rating": 0.88,
+    "supplier_history_months": 38,
+    "on_time_payment_ratio": 0.93,
+    "prior_defaults": 0
+  },
+  "requirements": {
+    "minimum_amount": 800000,
+    "max_settlement_hours": 48,
+    "desired_tenor_days": 60
+  },
+  "verification": {
+    "status": "VERIFIED",
+    "confidence": 0.95,
+    "verified_fields": ["invoice_number", "supplier_name", "buyer_name", "amount", "issue_date", "due_date"],
+    "uncertain_fields": [],
+    "reasons": ["Invoice fields are internally consistent under the synthetic verification policy."]
+  },
+  "risk": {
+    "score": 24.0,
+    "band": "LOW",
+    "confidence": 0.9,
+    "factors": [],
+    "missing_information": []
+  },
+  "providers": [
+    {
+      "id": "bank-a",
+      "name": "Astra Commercial Bank",
+      "provider_type": "BANK",
+      "available_liquidity": 5000000,
+      "risk_appetite": 42,
+      "min_return_rate": 8.2,
+      "max_ticket_size": 700000,
+      "preferred_industries": ["Manufacturing", "Automotive"],
+      "settlement_hours": 96,
+      "max_concentration_ratio": 0.60,
+      "current_exposure": 900000,
+      "portfolio_capacity": 8000000,
+      "base_advance_rate": 0.70,
+      "fee_rate": 0.002
+    },
+    {
+      "id": "nbfc-b",
+      "name": "VegaFlow NBFC",
+      "provider_type": "NBFC",
+      "available_liquidity": 1650000,
+      "risk_appetite": 68,
+      "min_return_rate": 9.4,
+      "max_ticket_size": 1500000,
+      "preferred_industries": ["Manufacturing", "Logistics", "Retail"],
+      "settlement_hours": 24,
+      "max_concentration_ratio": 0.72,
+      "current_exposure": 1300000,
+      "portfolio_capacity": 6000000,
+      "base_advance_rate": 0.85,
+      "fee_rate": 0.008
+    },
+    {
+      "id": "fintech-c",
+      "name": "PulseTrade Capital",
+      "provider_type": "FINTECH",
+      "available_liquidity": 2400000,
+      "risk_appetite": 78,
+      "min_return_rate": 10.5,
+      "max_ticket_size": 1200000,
+      "preferred_industries": ["Technology", "Retail"],
+      "settlement_hours": 2,
+      "max_concentration_ratio": 0.82,
+      "current_exposure": 1100000,
+      "portfolio_capacity": 4000000,
+      "base_advance_rate": 0.92,
+      "fee_rate": 0.04
+    },
+    {
+      "id": "fund-d",
+      "name": "Meridian Yield Fund",
+      "provider_type": "FUND",
+      "available_liquidity": 6000000,
+      "risk_appetite": 58,
+      "min_return_rate": 10.1,
+      "max_ticket_size": 2500000,
+      "preferred_industries": ["Pharma", "Automotive"],
+      "settlement_hours": 48,
+      "max_concentration_ratio": 0.50,
+      "current_exposure": 2600000,
+      "portfolio_capacity": 10000000,
+      "base_advance_rate": 0.80,
+      "fee_rate": 0.012
+    }
+  ]
+}
