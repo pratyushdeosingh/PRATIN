@@ -4,8 +4,25 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from contracts.models import (AuditEvent, FinancingRequirements, InvoiceEvaluationRequest, InvoiceParseResponse,
-    MarketRequest, OpportunityCreate, OpportunityRecord, PlatformMetrics, Provider, RiskLedgerEntry, Settlement, utc_now)
+from contracts.models import (
+    AuditEvent,
+    FinancingRequirements,
+    Invoice,
+    InvoiceEvaluationRequest,
+    InvoiceParseResponse,
+    MarketRequest,
+    OpportunityCreate,
+    OpportunityRecord,
+    PlatformMetrics,
+    Provider,
+    RiskLedgerEntry,
+    RiskSimulationRequest,
+    RiskSimulationResult,
+    Settlement,
+    StrictModel,
+    VerificationResult,
+    utc_now,
+)
 from .config import Settings
 from .fixtures import scenarios
 from .matching import rank_offers
@@ -93,11 +110,13 @@ def get_opportunity(item_id: str):
     if not item: raise HTTPException(404, "Opportunity not found")
     return item
 
-async def clear_market(item_id: str) -> OpportunityRecord:
+async def clear_market(item_id: str, requirements: FinancingRequirements | None = None) -> OpportunityRecord:
     """Run the reusable backend-owned allocation workflow for one opportunity."""
     item = store.get_opportunity(item_id)
     if not item: raise HTTPException(404, "Opportunity not found")
     if item.status == "SETTLED": raise HTTPException(409, "Settled opportunities cannot be rerun")
+    if requirements:
+        item = item.model_copy(update={"requirements": requirements})
     try:
         existing = [opp.invoice for opp in store.opportunities() if opp.id != item.id]
         evaluation, risk_status = await integrations.invoice_evaluation(
@@ -116,12 +135,12 @@ async def clear_market(item_id: str) -> OpportunityRecord:
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     store.audit("RISK_EVALUATED", f"Invoice {item.invoice.invoice_number} verified ({evaluation.verification.status.value}) with {evaluation.risk.band.value} risk score {evaluation.risk.score}/100.", item.id)
-    store.audit("MARKET_CLEARED", f"{len(market.offers)} providers evaluated; recommendation {decision.recommended_offer_id or 'none'}.", item.id)
+    store.audit("MARKET_CLEARED", f"{len(market.offers)} providers evaluated; recommendation {decision.recommended_offer_id or 'none'} under {item.requirements.priority} priority.", item.id)
     return item
 
 @app.post("/api/opportunities/{item_id}/run-market", response_model=OpportunityRecord)
-async def run_market(item_id: str):
-    return await clear_market(item_id)
+async def run_market(item_id: str, requirements: FinancingRequirements | None = None):
+    return await clear_market(item_id, requirements)
 
 @app.post("/api/opportunities/{item_id}/accept/{offer_id}", response_model=Settlement)
 def accept(item_id: str, offer_id: str):
@@ -149,6 +168,47 @@ def get_risk_ledger_entry(item_id: str):
     if not entry:
         raise HTTPException(404, "Risk ledger entry not found")
     return entry
+
+def _entry_invoice(entry: RiskLedgerEntry):
+    if entry.opportunity_id:
+        opp = store.get_opportunity(entry.opportunity_id)
+        if opp:
+            return opp.invoice
+    from contracts.models import Invoice
+    return Invoice(
+        invoice_number=entry.invoice_number,
+        supplier_name=entry.supplier_name,
+        buyer_name=entry.buyer_name,
+        amount=entry.amount,
+    )
+
+@app.get("/api/risk-ledger/{item_id}/what-if-scenarios", response_model=list[RiskSimulationResult])
+def get_what_if_scenarios(item_id: str):
+    entry = store.risk_ledger_entry(item_id)
+    if not entry:
+        raise HTTPException(404, "Risk ledger entry not found")
+    inv = _entry_invoice(entry)
+    from services.invoice_risk.engine import get_standard_what_if_scenarios
+    return get_standard_what_if_scenarios(inv, entry.verification)
+
+@app.post("/api/risk-ledger/{item_id}/simulate", response_model=RiskSimulationResult)
+def simulate_risk_for_entry(item_id: str, request: RiskSimulationRequest):
+    entry = store.risk_ledger_entry(item_id)
+    if not entry:
+        raise HTTPException(404, "Risk ledger entry not found")
+    inv = _entry_invoice(entry)
+    from services.invoice_risk.engine import simulate_risk_change
+    return simulate_risk_change(inv, entry.verification, request)
+
+class InvoiceSimulationPayload(StrictModel):
+    invoice: Invoice
+    verification: VerificationResult
+    simulation: RiskSimulationRequest
+
+@app.post("/api/invoices/simulate-risk", response_model=RiskSimulationResult)
+def simulate_invoice_risk(payload: InvoiceSimulationPayload):
+    from services.invoice_risk.engine import simulate_risk_change
+    return simulate_risk_change(payload.invoice, payload.verification, payload.simulation)
 
 @app.get("/api/platform/metrics", response_model=PlatformMetrics)
 def metrics():

@@ -9,8 +9,11 @@ from contracts.models import (
     InvoiceEvaluation,
     RiskAssessment,
     RiskBand,
+    RiskDecisionSummary,
     RiskFactor,
     RiskLedgerEntry,
+    RiskSimulationRequest,
+    RiskSimulationResult,
     VerificationResult,
     VerificationStatus,
     utc_now,
@@ -555,13 +558,324 @@ def assess_risk(invoice: Invoice, verification: VerificationResult) -> RiskAsses
     score = round(max(0.0, min(100.0, score)), 1)
     band = RiskBand.LOW if score < 30 else RiskBand.MODERATE if score < 55 else RiskBand.HIGH if score < 75 else RiskBand.SEVERE
     confidence = round(0.96 - 0.08 * len(verification.uncertain_fields), 2)
-    return RiskAssessment(
+    assessment = RiskAssessment(
         score=score,
         band=band,
         confidence=confidence,
         factors=factors,
         missing_information=verification.uncertain_fields,
     )
+    assessment.summary = generate_risk_summary(assessment, invoice)
+    return assessment
+
+
+def generate_risk_summary(risk: RiskAssessment, invoice: Invoice | None = None) -> RiskDecisionSummary:
+    """
+    Generate a dynamic, structured explanation of the risk score from actual factor data.
+    """
+    reducers = [f for f in risk.factors if f.points < 0]
+    reducers.sort(key=lambda f: f.points)  # Most negative first
+
+    contributors = [f for f in risk.factors if f.points > 0]
+    contributors.sort(key=lambda f: f.points, reverse=True)  # Largest positive first
+
+    primary_drivers: list[str] = []
+    for f in reducers:
+        label = f.label
+        if "buyer" in label.lower():
+            primary_drivers.append(f"Strong buyer reliability reduced risk by {abs(f.points):.1f} points.")
+        elif "payment" in label.lower():
+            primary_drivers.append(f"Strong payment history reduced risk by {abs(f.points):.1f} points.")
+        elif "supplier" in label.lower():
+            primary_drivers.append(f"Established supplier history reduced risk by {abs(f.points):.1f} points.")
+        else:
+            primary_drivers.append(f"{label} reduced risk by {abs(f.points):.1f} points.")
+
+    risk_contrib_msgs: list[str] = []
+    for f in contributors:
+        label = f.label
+        if "maturity" in label.lower():
+            risk_contrib_msgs.append(f"Invoice maturity added {f.points:.1f} points.")
+        elif "large ticket" in label.lower() or "concentration" in label.lower():
+            risk_contrib_msgs.append(f"Ticket concentration added {f.points:.1f} points.")
+        elif "duplicate" in label.lower():
+            risk_contrib_msgs.append(f"Duplicate invoice added {f.points:.1f} points.")
+        elif "amount" in label.lower() and "mismatch" in label.lower():
+            risk_contrib_msgs.append(f"Amount mismatch added {f.points:.1f} points.")
+        elif "uncertainty" in label.lower():
+            risk_contrib_msgs.append(f"Verification uncertainty added {f.points:.1f} points.")
+        elif "gstin" in label.lower():
+            risk_contrib_msgs.append(f"{label} added {f.points:.1f} points.")
+        else:
+            risk_contrib_msgs.append(f"{label} added {f.points:.1f} points.")
+
+    # Human-readable decision explanation template
+    if risk.band == RiskBand.LOW:
+        if reducers:
+            top_red = [r.label.lower() for r in reducers[:3]]
+            if len(top_red) == 1:
+                red_phrase = f"the {top_red[0]} is strong"
+            elif len(top_red) == 2:
+                red_phrase = f"the {top_red[0]} and {top_red[1]} are favorable"
+            else:
+                red_phrase = f"the buyer has strong reliability and payment history, while the supplier has an established operating history"
+            explanation = f"This invoice is LOW risk ({risk.score}/100) primarily because {red_phrase}."
+            if contributors:
+                top_cont = [c.label.lower() for c in contributors[:2]]
+                explanation += f" The remaining risk comes mainly from {' and '.join(top_cont)}."
+        else:
+            explanation = f"This invoice is LOW risk ({risk.score}/100) with a clean baseline profile."
+    elif risk.band == RiskBand.MODERATE:
+        contrib_phrase = ", ".join(c.label.lower() for c in contributors[:2]) if contributors else "baseline factors"
+        red_phrase = ", ".join(r.label.lower() for r in reducers[:2]) if reducers else "general fundamentals"
+        explanation = f"This invoice is MODERATE risk ({risk.score}/100). Favorable fundamentals ({red_phrase}) are balanced against elevated risk factors ({contrib_phrase})."
+    elif risk.band == RiskBand.HIGH:
+        contrib_phrase = ", ".join(c.label.lower() for c in contributors[:3]) if contributors else "elevated risk factors"
+        explanation = f"This invoice is HIGH risk ({risk.score}/100), driven primarily by significant risk factors: {contrib_phrase}."
+    else:  # SEVERE
+        contrib_phrase = ", ".join(c.label.lower() for c in contributors[:3]) if contributors else "critical risk factors"
+        explanation = f"This invoice is SEVERE risk ({risk.score}/100), driven by critical risk triggers: {contrib_phrase}."
+
+    return RiskDecisionSummary(
+        score=risk.score,
+        band=risk.band,
+        primary_drivers=primary_drivers,
+        risk_contributors=risk_contrib_msgs,
+        top_risk_contributors=contributors,
+        top_risk_reducers=reducers,
+        human_readable_explanation=explanation,
+    )
+
+
+def simulate_risk_change(
+    invoice: Invoice,
+    verification: VerificationResult,
+    simulation: RiskSimulationRequest,
+) -> RiskSimulationResult:
+    """
+    Deterministically simulate risk score changes under what-if condition overrides.
+    Reuses the exact same scoring weights, thresholds, and band rules as assess_risk.
+    Does NOT mutate invoice, verification, or Risk Ledger state.
+    """
+    original_assessment = assess_risk(invoice, verification)
+    sim_factors: list[RiskFactor] = []
+    score = RISK_POLICY_WEIGHTS["BASE_SCORE"]
+    modified_factors: list[RiskFactor] = []
+
+    def sim_factor(label: str, points: float, explanation: str, reason_code: str, is_modified: bool = False):
+        nonlocal score
+        score += points
+        impact = "negative" if points > 0 else "positive" if points < 0 else "neutral"
+        rf = RiskFactor(
+            label=label,
+            points=round(points, 1),
+            impact=impact,
+            explanation=explanation,
+            reason_code=reason_code,
+        )
+        sim_factors.append(rf)
+        if is_modified:
+            modified_factors.append(rf)
+
+    # 1. Buyer reliability
+    sim_buyer_rating = simulation.simulated_buyer_rating if simulation.simulated_buyer_rating is not None else invoice.buyer_rating
+    buyer_pts = RISK_POLICY_WEIGHTS["BUYER_RATING_MULTIPLIER"] * sim_buyer_rating
+    buyer_code = "BUYER_RELIABILITY_STRONG" if sim_buyer_rating >= 0.75 else "BUYER_RELIABILITY_WEAK"
+    sim_factor("Buyer reliability", buyer_pts, f"Buyer reliability signal is {sim_buyer_rating:.0%}.", buyer_code, is_modified=simulation.simulated_buyer_rating is not None)
+
+    # 2. Payment history
+    r = simulation.simulated_on_time_payment_ratio if simulation.simulated_on_time_payment_ratio is not None else invoice.on_time_payment_ratio
+    is_pmt_mod = simulation.simulated_on_time_payment_ratio is not None
+    if r >= 0.95:
+        sim_factor("Payment history", -15.0, f"Exceptional on-time payment ratio of {r:.0%}.", "PAYMENT_HISTORY_STRONG", is_modified=is_pmt_mod)
+    elif r >= 0.90:
+        sim_factor("Payment history", -10.0, f"Strong on-time payment ratio of {r:.0%}.", "PAYMENT_HISTORY_STRONG", is_modified=is_pmt_mod)
+    elif r >= 0.85:
+        sim_factor("Payment history", -5.0, f"Acceptable on-time payment ratio of {r:.0%}.", "PAYMENT_HISTORY_STRONG", is_modified=is_pmt_mod)
+    elif r >= 0.70:
+        sim_factor("Payment history", 5.0, f"On-time payment ratio of {r:.0%} shows moderate payment delays.", "PAYMENT_HISTORY_WEAK", is_modified=is_pmt_mod)
+    elif r >= 0.50:
+        sim_factor("Payment history", 12.0, f"On-time payment ratio of {r:.0%} increases payment risk.", "PAYMENT_HISTORY_WEAK", is_modified=is_pmt_mod)
+    else:
+        sim_factor("Payment history", 20.0, f"On-time payment ratio of {r:.0%} reflects critical delinquency.", "PAYMENT_HISTORY_CRITICAL", is_modified=is_pmt_mod)
+
+    # 3. Supplier operating history
+    m = simulation.simulated_supplier_history_months if simulation.simulated_supplier_history_months is not None else invoice.supplier_history_months
+    is_sup_mod = simulation.simulated_supplier_history_months is not None
+    if m < 6:
+        sim_factor("Supplier operating history", 12.0, f"New supplier with only {m} months of operating history.", "SUPPLIER_MATURITY_NEW", is_modified=is_sup_mod)
+    elif m < 12:
+        sim_factor("Supplier operating history", 8.0, f"Limited supplier history of {m} months.", "SUPPLIER_MATURITY_WEAK", is_modified=is_sup_mod)
+    elif m < 24:
+        sim_factor("Supplier operating history", 3.0, f"Developing supplier relationship with {m} months of history.", "SUPPLIER_MATURITY_WEAK", is_modified=is_sup_mod)
+    elif m < 36:
+        sim_factor("Supplier operating history", -5.0, f"Established supplier operating history of {m} months.", "SUPPLIER_MATURITY_STRONG", is_modified=is_sup_mod)
+    else:
+        sim_factor("Supplier operating history", -8.0, f"Mature supplier relationship with {m} months of history.", "SUPPLIER_MATURITY_STRONG", is_modified=is_sup_mod)
+
+    # 4. Prior defaults
+    d = simulation.simulated_prior_defaults if simulation.simulated_prior_defaults is not None else invoice.prior_defaults
+    if d > 0:
+        pts = min(30.0, 15.0 * d)
+        code = "PRIOR_DEFAULT" if d == 1 else "MULTIPLE_PRIOR_DEFAULTS"
+        sim_factor("Prior defaults", pts, f"{d} prior default(s) reported.", code, is_modified=simulation.simulated_prior_defaults is not None)
+
+    # 5. Large ticket / amount concentration
+    amt = simulation.simulated_amount if simulation.simulated_amount is not None else invoice.amount
+    is_amt_mod = simulation.simulated_amount is not None
+    if amt >= 10_000_000:
+        sim_factor("Large ticket", 12.0, f"Very large invoice size of ₹{amt:,.0f} creates high concentration risk.", "VERY_LARGE_INVOICE", is_modified=is_amt_mod)
+    elif amt >= 5_000_000:
+        sim_factor("Large ticket", 8.0, f"Large invoice size of ₹{amt:,.0f} increases concentration risk in the demo policy.", "LARGE_INVOICE", is_modified=is_amt_mod)
+    elif amt >= 2_500_000:
+        sim_factor("Large ticket", 4.0, f"Invoice amount of ₹{amt:,.0f} presents moderate concentration risk.", "LARGE_INVOICE", is_modified=is_amt_mod)
+    elif amt >= 1_000_000:
+        sim_factor("Large ticket", 2.0, f"Invoice amount of ₹{amt:,.0f} presents low concentration risk.", "CONCENTRATION_RISK", is_modified=is_amt_mod)
+
+    # 6. Invoice maturity
+    today = date.today()
+    if simulation.simulated_days_until_due is not None:
+        days = simulation.simulated_days_until_due
+        if days <= 14:
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_NEAR_DUE"], f"Invoice is due in {days} days, increasing repayment-urgency risk.", "MATURITY_NEAR_DUE", is_modified=True)
+        elif days <= 30:
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_SHORT_TENOR"], f"Invoice is due in {days} days, short tenor window.", "MATURITY_SHORT_TENOR", is_modified=True)
+        elif days <= 60:
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_MEDIUM_TENOR"], f"Invoice is due in {days} days, moderate tenor window.", "MATURITY_MEDIUM_TENOR", is_modified=True)
+        else:
+            sim_factor("Invoice maturity", 0.0, f"Invoice is due in {days} days (>60 days), low maturity urgency.", "MATURITY_LONG_TENOR", is_modified=True)
+    elif not invoice.due_date:
+        sim_factor("Invoice maturity", 0.0, "Due date unavailable — maturity cannot be calculated.", "MATURITY_UNKNOWN")
+    elif verification.status != VerificationStatus.REJECTED and invoice.due_date > today:
+        days = (invoice.due_date - today).days
+        if days <= 14:
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_NEAR_DUE"], f"Invoice is due in {days} days, increasing repayment-urgency risk.", "MATURITY_NEAR_DUE")
+        elif days <= 30:
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_SHORT_TENOR"], f"Invoice is due in {days} days, short tenor window.", "MATURITY_SHORT_TENOR")
+        elif days <= 60:
+            sim_factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_MEDIUM_TENOR"], f"Invoice is due in {days} days, moderate tenor window.", "MATURITY_MEDIUM_TENOR")
+
+    # 7. Verification status
+    v_status = simulation.simulated_verification_status or verification.status
+    is_ver_mod = simulation.simulated_verification_status is not None
+    if v_status == VerificationStatus.PARTIALLY_VERIFIED:
+        sim_factor("Verification uncertainty", RISK_POLICY_WEIGHTS["VERIFICATION_UNCERTAIN"], "Missing fields increase information asymmetry.", "VERIFICATION_UNCERTAIN", is_modified=is_ver_mod)
+    elif v_status == VerificationStatus.REJECTED:
+        sim_factor("Verification rejected", RISK_POLICY_WEIGHTS["VERIFICATION_REJECTED"], "Invoice failed the synthetic verification policy.", "VERIFICATION_REJECTED", is_modified=is_ver_mod)
+
+    # 8. Duplicate invoice
+    if simulation.simulate_duplicate is not None:
+        is_dup = simulation.simulate_duplicate
+        is_dup_mod = True
+    else:
+        is_dup = bool(verification.duplicate_check and verification.duplicate_check.duplicate_detected)
+        is_dup_mod = False
+    if is_dup:
+        matched_no = (verification.duplicate_check.matched_invoice_number if verification.duplicate_check else None) or "simulated duplicate"
+        sim_factor("Duplicate invoice", RISK_POLICY_WEIGHTS["DUPLICATE_INVOICE"], f"Invoice matches prior submission {matched_no}.", "DUPLICATE_INVOICE", is_modified=is_dup_mod)
+
+    # 9. Amount consistency mismatch
+    if "AMOUNT_MISMATCH" in verification.reason_codes:
+        sim_factor("Amount consistency mismatch", RISK_POLICY_WEIGHTS["AMOUNT_MISMATCH"], "Declared invoice total does not reconcile with subtotal plus tax.", "AMOUNT_MISMATCH")
+
+    # 10. GSTIN entity mismatch
+    if "GSTIN_ENTITY_MISMATCH" in verification.reason_codes:
+        sim_factor("GSTIN entity consistency", RISK_POLICY_WEIGHTS["GSTIN_ENTITY_MISMATCH"], "GSTIN PAN entity structure is inconsistent with supplier name.", "GSTIN_ENTITY_MISMATCH")
+
+    # 11. GSTIN state mismatch
+    if "GSTIN_STATE_MISMATCH" in verification.reason_codes:
+        sim_factor("GSTIN state consistency", RISK_POLICY_WEIGHTS["GSTIN_STATE_MISMATCH"], "Supplier location is inconsistent with GSTIN state code.", "GSTIN_STATE_MISMATCH")
+
+    sim_score = round(max(0.0, min(100.0, score)), 1)
+    sim_band = RiskBand.LOW if sim_score < 30 else RiskBand.MODERATE if sim_score < 55 else RiskBand.HIGH if sim_score < 75 else RiskBand.SEVERE
+    delta = round(sim_score - original_assessment.score, 1)
+
+    # Generate scenario-specific explanation
+    scenario_title = simulation.scenario_name or "Custom Simulation"
+    if simulation.simulate_duplicate is True:
+        scenario_title = "Duplicate Invoice Scenario"
+        expl = f"Adding the duplicate-invoice factor increases the score by {RISK_POLICY_WEIGHTS['DUPLICATE_INVOICE']:.0f} points."
+    elif simulation.simulated_on_time_payment_ratio is not None:
+        scenario_title = f"Payment History ({simulation.simulated_on_time_payment_ratio:.0%}) Scenario"
+        expl = f"Changing on-time payment ratio to {simulation.simulated_on_time_payment_ratio:.0%} shifts the score by {delta:+0.1f} points (Band: {sim_band.value})."
+    elif simulation.simulated_amount is not None:
+        scenario_title = f"Invoice Amount (₹{simulation.simulated_amount:,.0f}) Scenario"
+        expl = f"Adjusting invoice amount to ₹{simulation.simulated_amount:,.0f} changes ticket concentration by {delta:+0.1f} points (Band: {sim_band.value})."
+    elif simulation.simulated_days_until_due is not None:
+        scenario_title = f"Maturity Tenor ({simulation.simulated_days_until_due} days) Scenario"
+        expl = f"Adjusting maturity window to {simulation.simulated_days_until_due} days changes urgency points by {delta:+0.1f} points (Band: {sim_band.value})."
+    elif simulation.simulated_verification_status is not None:
+        scenario_title = f"Verification Status ({simulation.simulated_verification_status.value}) Scenario"
+        expl = f"Simulating verification as {simulation.simulated_verification_status.value} alters verification penalty by {delta:+0.1f} points (Band: {sim_band.value})."
+    else:
+        sign = "+" if delta >= 0 else ""
+        expl = f"Simulated changes result in a {sign}{delta:.1f} point change (New score: {sim_score}/100, Band: {sim_band.value})."
+
+    return RiskSimulationResult(
+        scenario_name=scenario_title,
+        original_score=original_assessment.score,
+        original_band=original_assessment.band,
+        simulated_score=sim_score,
+        simulated_band=sim_band,
+        score_delta=delta,
+        explanation=expl,
+        modified_factors=modified_factors,
+    )
+
+
+def get_standard_what_if_scenarios(
+    invoice: Invoice,
+    verification: VerificationResult,
+) -> list[RiskSimulationResult]:
+    """
+    Generate preset standard what-if analysis scenarios for the given invoice and verification result.
+    """
+    scenarios: list[RiskSimulationResult] = []
+
+    # 1. Duplicate invoice scenario
+    scenarios.append(simulate_risk_change(
+        invoice,
+        verification,
+        RiskSimulationRequest(scenario_name="Duplicate Invoice Detected", simulate_duplicate=True),
+    ))
+
+    # 2. Lower payment history (60%)
+    scenarios.append(simulate_risk_change(
+        invoice,
+        verification,
+        RiskSimulationRequest(scenario_name="Lower On-Time Payment History (60%)", simulated_on_time_payment_ratio=0.60),
+    ))
+
+    # 3. High amount / Large ticket (₹5,000,000)
+    scenarios.append(simulate_risk_change(
+        invoice,
+        verification,
+        RiskSimulationRequest(scenario_name="Higher Invoice Amount (₹5,000,000)", simulated_amount=5000000.0),
+    ))
+
+    # 4. Urgent maturity (10 days)
+    if invoice.due_date:
+        scenarios.append(simulate_risk_change(
+            invoice,
+            verification,
+            RiskSimulationRequest(scenario_name="Urgent Maturity Tenor (10 days)", simulated_days_until_due=10),
+        ))
+    else:
+        scenarios.append(simulate_risk_change(
+            invoice,
+            verification,
+            RiskSimulationRequest(scenario_name="Urgent Maturity Tenor (10 days)", simulated_days_until_due=10),
+        ))
+
+    # 5. Verification uncertainty (+12)
+    if verification.status == VerificationStatus.VERIFIED:
+        scenarios.append(simulate_risk_change(
+            invoice,
+            verification,
+            RiskSimulationRequest(scenario_name="Verification Uncertainty", simulated_verification_status=VerificationStatus.PARTIALLY_VERIFIED),
+        ))
+
+    return scenarios
 
 
 def evaluate(invoice: Invoice, existing_invoices: list[Invoice] | None = None) -> InvoiceEvaluation:
