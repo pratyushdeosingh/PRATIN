@@ -121,7 +121,7 @@ python -m backend.app.integration_check
 docker compose config --quiet
 ```
 
-Current baseline: **140 passing Python tests**, **6 Postgres-only tests skipped unless `PRATIN_TEST_POSTGRES_URL` is configured**, and **8 passing frontend tests**. Coverage includes PDF validation/parsing, duplicate and consistency detection, synthetic GSTIN-format checks, risk explanation/what-if simulations, provider-agent constraints and pricing, matching, replay-safe settlement, rollback, stale-state protection, persistence selection, the end-to-end two-allocation flow, and counterfactual simulations.
+Current baseline: **168 passing Python tests**, **6 Postgres-only tests skipped unless `PRATIN_TEST_POSTGRES_URL` is configured**, and **8 passing frontend tests**. Coverage includes PDF validation/parsing, duplicate and consistency detection, synthetic GSTIN-format checks, risk explanation/what-if simulations, provider-agent constraints and pricing, matching, replay-safe settlement, rollback, stale-state protection, persistence selection, the end-to-end two-allocation flow, counterfactual simulations, and evidence/provenance handling for the Capital Agents research cockpit.
 
 ## Repository map
 
