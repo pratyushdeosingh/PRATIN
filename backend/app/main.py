@@ -49,7 +49,10 @@ async def upload_and_parse_invoice_pdf(file: UploadFile = File(...)):
     if len(pdf_bytes) > 10 * 1024 * 1024:
         raise HTTPException(413, "PDF exceeds maximum allowed size of 10MB.")
     try:
-        parsed_resp, status = await integrations.parse_invoice_pdf(pdf_bytes, filename=file.filename or "invoice.pdf")
+        existing = [opp.invoice for opp in store.opportunities()]
+        parsed_resp, status = await integrations.parse_invoice_pdf(
+            pdf_bytes, filename=file.filename or "invoice.pdf", existing_invoices=existing
+        )
     except Exception as exc:
         raise HTTPException(503, f"Invoice risk service unavailable: {exc}") from exc
     if parsed_resp.status in ("PDF_EMPTY", "PDF_INVALID"):
@@ -96,7 +99,10 @@ async def clear_market(item_id: str) -> OpportunityRecord:
     if not item: raise HTTPException(404, "Opportunity not found")
     if item.status == "SETTLED": raise HTTPException(409, "Settled opportunities cannot be rerun")
     try:
-        evaluation, risk_status = await integrations.invoice_evaluation(InvoiceEvaluationRequest(invoice=item.invoice))
+        existing = [opp.invoice for opp in store.opportunities() if opp.id != item.id]
+        evaluation, risk_status = await integrations.invoice_evaluation(
+            InvoiceEvaluationRequest(invoice=item.invoice, existing_invoices=existing)
+        )
         providers = store.providers()
         market, market_status = await integrations.market(MarketRequest(opportunity_id=item.id, invoice=item.invoice,
             requirements=item.requirements, verification=evaluation.verification, risk=evaluation.risk, providers=providers))
