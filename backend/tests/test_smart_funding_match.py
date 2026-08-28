@@ -221,8 +221,12 @@ def test_provider_hard_gates_ticket_size_and_risk_appetite():
     )
     analysis1 = analyze_provider(req1, provider, load_market())
     offer1 = act(req1, analysis1)
-    assert offer1.status == "DECLINE"
-    assert any("maximum ticket size" in r.lower() for r in offer1.reasons)
+    # Provider ticket capacity is a supplier-side mandate mismatch. The
+    # provider prices its available ticket and Core's matcher makes it ineligible.
+    assert offer1.status == "OFFER"
+    decision1 = rank_offers(req1.opportunity_id, reqs1, risk_low, [offer1], {provider.id: provider.available_liquidity})
+    assert decision1.ranked_offers[0].eligible is False
+    assert any("below required" in reason.lower() for reason in decision1.ranked_offers[0].hard_constraint_failures)
 
     # 2. High-risk invoice exceeds provider risk appetite (risk 65 > appetite 30)
     inv_small = Invoice(

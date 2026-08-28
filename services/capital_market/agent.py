@@ -180,27 +180,30 @@ def evaluate_attractiveness(ctx: dict) -> AttractivenessAssessment:
     ))
 
     # 3. Buyer quality (credit-worthy buyer)
-    buyer = round(invoice.buyer_rating * 100.0, 1)
+    buyer_rating = invoice.buyer_rating if invoice.buyer_rating is not None else 0.75
+    buyer = round(buyer_rating * 100.0, 1)
     factors.append(AttractivenessFactor(
         label="Buyer quality",
         score=buyer,
-        explanation=f"Buyer rating is {invoice.buyer_rating:.0%}.",
+        explanation=f"Buyer rating is {buyer_rating:.0%}.",
     ))
 
     # 4. Payment history
-    pay = round(invoice.on_time_payment_ratio * 100.0, 1)
+    payment_ratio = invoice.on_time_payment_ratio if invoice.on_time_payment_ratio is not None else 0.86
+    pay = round(payment_ratio * 100.0, 1)
     factors.append(AttractivenessFactor(
         label="Payment history",
         score=pay,
-        explanation=f"Supplier on-time payment ratio is {invoice.on_time_payment_ratio:.0%}.",
+        explanation=f"Supplier on-time payment ratio is {payment_ratio:.0%}.",
     ))
 
     # 5. Prior defaults
-    if invoice.prior_defaults > 0:
+    prior_defaults = invoice.prior_defaults if invoice.prior_defaults is not None else 0
+    if prior_defaults > 0:
         factors.append(AttractivenessFactor(
             label="Prior defaults",
             score=0.0,
-            explanation=f"{invoice.prior_defaults} prior default(s) reported.",
+            explanation=f"{prior_defaults} prior default(s) reported.",
         ))
     else:
         factors.append(AttractivenessFactor(
