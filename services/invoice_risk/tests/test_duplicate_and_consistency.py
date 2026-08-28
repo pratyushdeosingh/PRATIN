@@ -26,6 +26,8 @@ def create_base_invoice(
     tax_amount: float | None = None,
     issue_date: object = _SENTINEL,
     due_date: object = _SENTINEL,
+    gstin: str | None = "27AABCC1234F1Z5",
+    supplier_state: str | None = None,
 ) -> Invoice:
     today = date.today()
     resolved_issue = (today - timedelta(days=5)) if issue_date is _SENTINEL else issue_date
@@ -39,10 +41,11 @@ def create_base_invoice(
         issue_date=resolved_issue,  # type: ignore
         due_date=resolved_due,      # type: ignore
         industry="Manufacturing",
-        gstin="27ABCDE1234F1Z5",
+        gstin=gstin,
         purchase_order_reference="PO-2026-99",
         subtotal=subtotal,
         tax_amount=tax_amount,
+        supplier_state=supplier_state,
         buyer_rating=0.85,
         supplier_history_months=30,
         on_time_payment_ratio=0.92,
@@ -349,3 +352,162 @@ def test_two_pdfs_with_different_and_missing_due_dates():
     assert "days" in f1.explanation
     assert f2.reason_code == "MATURITY_UNKNOWN"
     assert "Due date unavailable" in f2.explanation
+
+
+# =========================================================================
+# FEATURE 3: GSTIN ENTITY & STATE CONSISTENCY TESTS
+# =========================================================================
+
+def test_valid_gstin_and_matching_supplier_state():
+    # 27 = Maharashtra, supplier_state = "Maharashtra"
+    inv = create_base_invoice(
+        gstin="27AABCC1234F1Z5",
+        supplier_state="Maharashtra",
+    )
+    verif = verify_invoice(inv)
+    assert verif.status == VerificationStatus.VERIFIED
+    assert "GSTIN_STATE_CONSISTENT" in verif.reason_codes
+    assert "GSTIN_STATE_MISMATCH" not in verif.reason_codes
+    assert verif.gstin_check is not None
+    assert verif.gstin_check.state_match is True
+    assert verif.gstin_check.state_code == "27"
+    assert verif.gstin_check.state_name == "Maharashtra"
+
+
+def test_valid_gstin_and_mismatching_supplier_state():
+    # 27 = Maharashtra, supplier_state = "Karnataka"
+    inv = create_base_invoice(
+        gstin="27AABCC1234F1Z5",
+        supplier_state="Karnataka",
+    )
+    verif = verify_invoice(inv)
+    assert "GSTIN_STATE_MISMATCH" in verif.reason_codes
+    assert verif.gstin_check is not None
+    assert verif.gstin_check.state_match is False
+
+    eval_res = evaluate(inv)
+    st_factor = next((f for f in eval_res.risk.factors if f.label == "GSTIN state consistency"), None)
+    assert st_factor is not None
+    assert st_factor.points == 10.0
+    assert st_factor.reason_code == "GSTIN_STATE_MISMATCH"
+    assert "Karnataka" in st_factor.explanation
+    assert "Maharashtra" in st_factor.explanation
+
+
+def test_invalid_gstin_state_code_rejected():
+    # 95 is not a valid Indian GST state code
+    inv = create_base_invoice(gstin="95AABCC1234F1Z5")
+    verif = verify_invoice(inv)
+    assert verif.status == VerificationStatus.REJECTED
+    assert "INVALID_GSTIN_STATE_CODE" in verif.reason_codes or "GSTIN_INVALID" in verif.reason_codes
+
+
+def test_company_supplier_and_company_gstin_entity():
+    # Supplier "Pvt Ltd", PAN 4th char "C" (Company)
+    inv = create_base_invoice(
+        supplier_name="Apex Precision Pvt Ltd",
+        gstin="27AABCC1234F1Z5",
+    )
+    verif = verify_invoice(inv)
+    assert verif.status == VerificationStatus.VERIFIED
+    assert "GSTIN_ENTITY_CONSISTENT" in verif.reason_codes
+    assert "GSTIN_ENTITY_MISMATCH" not in verif.reason_codes
+    assert verif.gstin_check is not None
+    assert verif.gstin_check.entity_match is True
+    assert verif.gstin_check.pan_entity_type == "Company"
+
+
+def test_pvt_ltd_supplier_with_individual_pan_mismatch():
+    # Supplier "Pvt Ltd", PAN 4th char "P" (Individual / Proprietor) at index 5: 27AABPK1234F1Z5
+    inv = create_base_invoice(
+        supplier_name="Apex Global Technologies Pvt Ltd",
+        gstin="27AABPK1234F1Z5",
+    )
+    verif = verify_invoice(inv)
+    assert "GSTIN_ENTITY_MISMATCH" in verif.reason_codes
+    assert verif.gstin_check is not None
+    assert verif.gstin_check.entity_match is False
+    assert verif.gstin_check.pan_entity_type == "Individual / Proprietorship"
+
+    eval_res = evaluate(inv)
+    ent_factor = next((f for f in eval_res.risk.factors if f.label == "GSTIN entity consistency"), None)
+    assert ent_factor is not None
+    assert ent_factor.points == 15.0
+    assert ent_factor.reason_code == "GSTIN_ENTITY_MISMATCH"
+    assert "Company" in ent_factor.explanation or "Pvt Ltd" in ent_factor.explanation
+
+
+def test_llp_supplier_with_company_pan_mismatch():
+    # Supplier "LLP", PAN 4th char "C" (Company)
+    inv = create_base_invoice(
+        supplier_name="Apex Precision LLP",
+        gstin="27AABCC1234F1Z5",
+    )
+    verif = verify_invoice(inv)
+    assert "GSTIN_ENTITY_MISMATCH" in verif.reason_codes
+    assert verif.gstin_check is not None
+    assert verif.gstin_check.entity_match is False
+
+    eval_res = evaluate(inv)
+    ent_factor = next((f for f in eval_res.risk.factors if f.label == "GSTIN entity consistency"), None)
+    assert ent_factor is not None
+    assert ent_factor.points == 15.0
+
+
+def test_generic_supplier_name_with_proprietorship_no_false_positive():
+    # "ABC Traders" without Pvt Ltd/LLP suffix with "P" (Proprietor) -> No false positive
+    inv = create_base_invoice(
+        supplier_name="ABC Traders",
+        gstin="27AABPK1234F1Z5",
+    )
+    verif = verify_invoice(inv)
+    assert "GSTIN_ENTITY_MISMATCH" not in verif.reason_codes
+    eval_res = evaluate(inv)
+    assert not any(f.label == "GSTIN entity consistency" for f in eval_res.risk.factors)
+
+
+def test_missing_supplier_state_skips_state_check():
+    inv = create_base_invoice(
+        gstin="27AABCC1234F1Z5",
+        supplier_state=None,
+    )
+    verif = verify_invoice(inv)
+    assert "GSTIN_STATE_MISMATCH" not in verif.reason_codes
+    eval_res = evaluate(inv)
+    assert not any(f.label == "GSTIN state consistency" for f in eval_res.risk.factors)
+
+
+def test_missing_gstin_preserves_uncertainty():
+    inv = create_base_invoice(gstin=None)
+    verif = verify_invoice(inv)
+    assert "gstin" in verif.uncertain_fields
+    assert "GSTIN_MISSING" in verif.reason_codes
+    assert "GSTIN_STATE_MISMATCH" not in verif.reason_codes
+    assert "GSTIN_ENTITY_MISMATCH" not in verif.reason_codes
+
+
+def test_pdf_invoice_with_gstin_state_and_entity_mismatch():
+    pdf_text = """
+    TAX INVOICE
+    Supplier Name: TechSoft Solutions Pvt Ltd
+    Supplier State: Karnataka
+    Buyer Name: Reliance Retail Ltd
+    Invoice Number: INV-TECH- Karnataka
+    Invoice Date: 2026-08-15
+    Due Date: 2026-10-15
+    GSTIN: 27AABPK1234F1Z5
+    Total Amount: INR 750,000.00
+    """
+    pdf_bytes = make_pdf(pdf_text)
+    res = parse_and_evaluate_pdf(pdf_bytes, filename="techsoft.pdf")
+    assert res.status == "SUCCESS"
+    assert res.invoice is not None
+    verif = res.evaluation.verification
+    assert "GSTIN_STATE_MISMATCH" in verif.reason_codes
+    assert "GSTIN_ENTITY_MISMATCH" in verif.reason_codes
+
+    risk = res.evaluation.risk
+    ent_f = next((f for f in risk.factors if f.label == "GSTIN entity consistency"), None)
+    st_f = next((f for f in risk.factors if f.label == "GSTIN state consistency"), None)
+    assert ent_f is not None and ent_f.points == 15.0
+    assert st_f is not None and st_f.points == 10.0

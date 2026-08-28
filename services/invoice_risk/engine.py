@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from contracts.models import (
     DuplicateCheckResult,
+    GSTINCheckResult,
     Invoice,
     InvoiceEvaluation,
     RiskAssessment,
@@ -16,6 +17,116 @@ from contracts.models import (
 )
 
 
+GSTIN_STATE_CODES: dict[str, str] = {
+    "01": "Jammu and Kashmir",
+    "02": "Himachal Pradesh",
+    "03": "Punjab",
+    "04": "Chandigarh",
+    "05": "Uttarakhand",
+    "06": "Haryana",
+    "07": "Delhi",
+    "08": "Rajasthan",
+    "09": "Uttar Pradesh",
+    "10": "Bihar",
+    "11": "Sikkim",
+    "12": "Arunachal Pradesh",
+    "13": "Nagaland",
+    "14": "Manipur",
+    "15": "Mizoram",
+    "16": "Tripura",
+    "17": "Meghalaya",
+    "18": "Assam",
+    "19": "West Bengal",
+    "20": "Jharkhand",
+    "21": "Odisha",
+    "22": "Chhattisgarh",
+    "23": "Madhya Pradesh",
+    "24": "Gujarat",
+    "26": "Dadra and Nagar Haveli and Daman and Diu",
+    "27": "Maharashtra",
+    "29": "Karnataka",
+    "30": "Goa",
+    "31": "Lakshadweep",
+    "32": "Kerala",
+    "33": "Tamil Nadu",
+    "34": "Puducherry",
+    "35": "Andaman and Nicobar Islands",
+    "36": "Telangana",
+    "37": "Andhra Pradesh",
+    "38": "Ladakh",
+    "97": "Other Territory",
+    "99": "Centre Jurisdiction",
+}
+
+PAN_ENTITY_TYPES: dict[str, str] = {
+    "C": "Company",
+    "P": "Individual / Proprietorship",
+    "F": "Partnership Firm / LLP",
+    "H": "Hindu Undivided Family (HUF)",
+    "A": "Association of Persons (AOP)",
+    "T": "Trust",
+    "B": "Body of Individuals (BOI)",
+    "G": "Government Agency",
+    "J": "Artificial Juridical Person",
+    "L": "Local Authority",
+}
+
+
+def check_gstin_entity_consistency(supplier_name: str, pan_entity_char: str) -> tuple[bool | None, str | None, str | None]:
+    """
+    Deterministically check whether a supplier name containing corporate/legal suffixes
+    matches the PAN entity type encoded in position 4 of PAN (pos 5 of 15-char GSTIN).
+    Returns: (entity_match: bool | None, inferred_type: str | None, explanation: str | None)
+    """
+    s_lower = f" {supplier_name.lower().strip()} "
+
+    is_company = any(
+        term in s_lower
+        for term in [" private limited ", " pvt ltd ", " pvt. ltd. ", " pvt.ltd. ", " limited ", " ltd. ", " ltd "]
+    )
+    is_llp = any(
+        term in s_lower
+        for term in [" llp ", " limited liability partnership ", " partnership ", " & partners ", " and partners "]
+    )
+
+    if is_company and not is_llp:
+        inferred = "Company"
+        if pan_entity_char == "C":
+            return True, inferred, None
+        elif pan_entity_char == "P":
+            return (
+                False,
+                inferred,
+                "Supplier name indicates a Company (Pvt Ltd/Ltd) but GSTIN PAN structure indicates an Individual / Proprietorship ('P').",
+            )
+        elif pan_entity_char in ("F", "H", "T"):
+            pan_desc = PAN_ENTITY_TYPES.get(pan_entity_char, pan_entity_char)
+            return (
+                False,
+                inferred,
+                f"Supplier name indicates a Company but GSTIN PAN structure indicates {pan_desc} ('{pan_entity_char}').",
+            )
+        else:
+            return True, inferred, None
+
+    if is_llp:
+        inferred = "Partnership Firm / LLP"
+        if pan_entity_char == "F":
+            return True, inferred, None
+        elif pan_entity_char in ("C", "P"):
+            pan_desc = PAN_ENTITY_TYPES.get(pan_entity_char, pan_entity_char)
+            return (
+                False,
+                inferred,
+                f"Supplier name indicates an LLP / Partnership but GSTIN PAN structure indicates {pan_desc} ('{pan_entity_char}').",
+            )
+        else:
+            return True, inferred, None
+
+    # Generic name -> uncertainty/no false positive
+    return None, None, None
+
+
 RISK_POLICY_WEIGHTS = {
     "BASE_SCORE": 38.0,
     "BUYER_RATING_MULTIPLIER": -18.0,
@@ -26,6 +137,8 @@ RISK_POLICY_WEIGHTS = {
     "VERIFICATION_REJECTED": 45.0,
     "DUPLICATE_INVOICE": 35.0,
     "AMOUNT_MISMATCH": 20.0,
+    "GSTIN_ENTITY_MISMATCH": 15.0,
+    "GSTIN_STATE_MISMATCH": 10.0,
 }
 
 
@@ -193,7 +306,8 @@ def verify_invoice(invoice: Invoice, existing_invoices: list[Invoice] | None = N
             verified.append("amount_consistency")
             reason_codes.append("AMOUNT_CONSISTENT")
 
-    # 7. GSTIN validation
+    # 7. GSTIN validation & Consistency
+    gstin_res: GSTINCheckResult | None = None
     if not invoice.gstin or not invoice.gstin.strip():
         uncertain.append("gstin")
         reasons.append("Supplier GSTIN was not supplied for the simulated consistency check.")
@@ -208,9 +322,12 @@ def verify_invoice(invoice: Invoice, existing_invoices: list[Invoice] | None = N
                 uncertain_fields=["gstin"],
                 reasons=["GSTIN format is inconsistent with the 15-character demo rule."],
                 reason_codes=["GSTIN_INVALID"],
+                duplicate_check=dup_res,
+                consistency_warnings=consistency_warnings,
             )
         state_prefix = norm[:2]
-        is_valid_state = state_prefix.isdigit() and (1 <= int(state_prefix) <= 38 or int(state_prefix) in (97, 99))
+        state_name = GSTIN_STATE_CODES.get(state_prefix)
+        is_valid_state = state_name is not None
         is_fake_repetitive = len(set(norm)) <= 3 or norm.startswith("AAAA") or norm == "000000000000000" or norm == "111111111111111"
         if not is_valid_state or is_fake_repetitive:
             return VerificationResult(
@@ -219,10 +336,59 @@ def verify_invoice(invoice: Invoice, existing_invoices: list[Invoice] | None = N
                 verified_fields=verified,
                 uncertain_fields=["gstin"],
                 reasons=["GSTIN state code or character distribution is invalid for the demo rule."],
-                reason_codes=["GSTIN_INVALID"],
+                reason_codes=["GSTIN_INVALID", "INVALID_GSTIN_STATE_CODE"] if not is_valid_state else ["GSTIN_INVALID"],
+                duplicate_check=dup_res,
+                consistency_warnings=consistency_warnings,
             )
+
+        # GSTIN structure is valid -> Perform consistency checks
+        pan_char = norm[5]
+        pan_type = PAN_ENTITY_TYPES.get(pan_char, "Other")
+        gstin_warnings: list[str] = []
+        state_match: bool | None = None
+        entity_match: bool | None = None
+        inferred_entity: str | None = None
+
+        # Check 2: Supplier Location vs GSTIN State
+        if invoice.supplier_state and invoice.supplier_state.strip():
+            sup_st_norm = "".join(ch for ch in invoice.supplier_state.lower() if ch.isalnum())
+            gst_st_norm = "".join(ch for ch in state_name.lower() if ch.isalnum())
+            if sup_st_norm == gst_st_norm or invoice.supplier_state.strip() == state_prefix:
+                state_match = True
+                reason_codes.append("GSTIN_STATE_CONSISTENT")
+            else:
+                state_match = False
+                state_msg = f"GSTIN_STATE_MISMATCH: Supplier state '{invoice.supplier_state}' does not match GSTIN state '{state_name}' (State Code {state_prefix})."
+                reasons.append(state_msg)
+                reason_codes.append("GSTIN_STATE_MISMATCH")
+                consistency_warnings.append(state_msg)
+                gstin_warnings.append(state_msg)
+
+        # Check 4: Supplier Name vs PAN Entity Type
+        entity_match, inferred_entity, entity_msg = check_gstin_entity_consistency(invoice.supplier_name, pan_char)
+        if entity_match is True:
+            reason_codes.append("GSTIN_ENTITY_CONSISTENT")
+        elif entity_match is False and entity_msg:
+            reasons.append(f"GSTIN_ENTITY_MISMATCH: {entity_msg}")
+            reason_codes.append("GSTIN_ENTITY_MISMATCH")
+            consistency_warnings.append(f"GSTIN_ENTITY_MISMATCH: {entity_msg}")
+            gstin_warnings.append(entity_msg)
+
         verified.append("gstin")
         reason_codes.append("GSTIN_VERIFIED")
+        gstin_res = GSTINCheckResult(
+            is_valid_format=True,
+            gstin=norm,
+            state_code=state_prefix,
+            state_name=state_name,
+            supplier_state=invoice.supplier_state,
+            state_match=state_match,
+            pan_entity_code=pan_char,
+            pan_entity_type=pan_type,
+            supplier_entity_inferred=inferred_entity,
+            entity_match=entity_match,
+            warnings=gstin_warnings,
+        )
 
     # 8. Purchase Order Reference
     if not invoice.purchase_order_reference or not invoice.purchase_order_reference.strip():
@@ -250,6 +416,7 @@ def verify_invoice(invoice: Invoice, existing_invoices: list[Invoice] | None = N
         reasons=reasons,
         reason_codes=reason_codes,
         duplicate_check=dup_res,
+        gstin_check=gstin_res,
         consistency_warnings=consistency_warnings,
     )
 
@@ -364,6 +531,26 @@ def assess_risk(invoice: Invoice, verification: VerificationResult) -> RiskAsses
         else:
             expl = "Declared invoice total does not reconcile with subtotal plus tax."
         factor("Amount consistency mismatch", RISK_POLICY_WEIGHTS["AMOUNT_MISMATCH"], expl, "AMOUNT_MISMATCH")
+
+    # 10. GSTIN entity mismatch factor
+    if "GSTIN_ENTITY_MISMATCH" in verification.reason_codes:
+        expl = "GSTIN PAN entity structure is inconsistent with the supplier name provided."
+        if verification.gstin_check and verification.gstin_check.warnings:
+            for w in verification.gstin_check.warnings:
+                if "indicates" in w.lower():
+                    expl = w
+                    break
+        factor("GSTIN entity consistency", RISK_POLICY_WEIGHTS["GSTIN_ENTITY_MISMATCH"], expl, "GSTIN_ENTITY_MISMATCH")
+
+    # 11. GSTIN state mismatch factor
+    if "GSTIN_STATE_MISMATCH" in verification.reason_codes:
+        expl = "Supplier location is inconsistent with the GSTIN state code."
+        if verification.gstin_check and verification.gstin_check.warnings:
+            for w in verification.gstin_check.warnings:
+                if "state" in w.lower():
+                    expl = w
+                    break
+        factor("GSTIN state consistency", RISK_POLICY_WEIGHTS["GSTIN_STATE_MISMATCH"], expl, "GSTIN_STATE_MISMATCH")
 
     score = round(max(0.0, min(100.0, score)), 1)
     band = RiskBand.LOW if score < 30 else RiskBand.MODERATE if score < 55 else RiskBand.HIGH if score < 75 else RiskBand.SEVERE
