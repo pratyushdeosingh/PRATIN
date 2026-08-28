@@ -5,6 +5,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY contracts contracts
 COPY services services
 COPY backend backend
+COPY supabase supabase
 RUN mkdir -p data
 CMD ["uvicorn","backend.app.main:app","--host","0.0.0.0","--port","8000"]
-

@@ -21,7 +21,8 @@ def test_full_invoice_to_settlement_loop_changes_liquidity_and_audit():
     assert settlement.status_code == 200 and settlement.json()["status"] == "SIMULATED_SETTLED"
     after=next(p for p in client.get("/api/providers").json() if p["id"]==winning["offer"]["provider_id"])
     assert after["available_liquidity"] == before["available_liquidity"]-winning["offer"]["financed_amount"]
-    assert client.post(f"/api/opportunities/{created['id']}/accept/{recommendation}").status_code == 409
+    replay=client.post(f"/api/opportunities/{created['id']}/accept/{recommendation}")
+    assert replay.status_code == 200 and replay.json()["id"] == settlement.json()["id"]
     assert {x["event_type"] for x in client.get("/api/audit").json()} >= {"OPPORTUNITY_CREATED","MARKET_CLEARED","SETTLEMENT_COMPLETED"}
     second_scenario=client.get("/api/scenarios").json()["strong"]
     second=client.post("/api/opportunities",json=second_scenario).json()

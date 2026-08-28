@@ -1,4 +1,4 @@
-from backend.app.matching import rank_offers
+from backend.app.matching import MATCHING_POLICY_VERSION, WEIGHTS, rank_offers
 from contracts.models import FinancingRequirements, Offer, RiskAssessment, RiskBand
 
 def offer(id,rate,amount,hours,cost): return Offer(id=id,opportunity_id="o",provider_id=id,provider_name=id,
@@ -21,3 +21,14 @@ def test_ranking_is_deterministic():
     second=rank_offers("o",requirements,risk,offers,{"a":3_000_000,"b":2_000_000})
     assert first == second
 
+def test_hard_constraints_dominate_score_and_factors_use_canonical_weights():
+    requirements=FinancingRequirements(minimum_amount=800_000,max_settlement_hours=48,desired_tenor_days=60)
+    risk=RiskAssessment(score=24,band=RiskBand.LOW,confidence=.9,factors=[],missing_information=[])
+    too_small=offer("small",7,799_999,2,1_000)
+    eligible=offer("eligible",14,800_000,48,50_000)
+    decision=rank_offers("o",requirements,risk,[too_small,eligible],{"small":9_000_000,"eligible":1_000_000})
+    assert decision.recommended_offer_id == "eligible"
+    assert decision.policy_version == MATCHING_POLICY_VERSION
+    assert sum(WEIGHTS.values()) == 1
+    winner=next(item for item in decision.ranked_offers if item.offer.id == "eligible")
+    assert {factor.name.lower().replace(" ", "_"): factor.weight for factor in winner.factors} == WEIGHTS
