@@ -211,6 +211,40 @@ def parse_extracted_text(text: str) -> ExtractedInvoiceFields:
             purchase_order_reference = match.group(1).strip().rstrip(".,;")
             break
 
+    # 9. Subtotal
+    subtotal: float | None = None
+    subtotal_patterns = [
+        r'(?i)\b(?:subtotal|sub\s*total|net\s*amount)\b\s*[:\-\s]*(?:INR|RS|₹)?[\s\.]*([0-9,]+(?:\.[0-9]{1,2})?)',
+    ]
+    for p in subtotal_patterns:
+        match = re.search(p, text)
+        if match:
+            raw_amt = match.group(1).replace(",", "").strip()
+            try:
+                val = float(raw_amt)
+                if val > 0:
+                    subtotal = val
+                    break
+            except ValueError:
+                pass
+
+    # 10. Tax Amount
+    tax_amount: float | None = None
+    tax_patterns = [
+        r'(?i)\b(?:tax|vat|gst|igst|cgst\s*\+\s*sgst|tax\s*amount)\b(?:\s*\([^\)]*\))?\s*[:\-\s]*(?:INR|RS|₹)?[\s\.]*([0-9,]+(?:\.[0-9]{1,2})?)',
+    ]
+    for p in tax_patterns:
+        match = re.search(p, text)
+        if match:
+            raw_amt = match.group(1).replace(",", "").strip()
+            try:
+                val = float(raw_amt)
+                if val >= 0:
+                    tax_amount = val
+                    break
+            except ValueError:
+                pass
+
     # Compute missing fields & extraction confidence
     missing_fields: list[str] = []
     if not invoice_number:
@@ -250,13 +284,19 @@ def parse_extracted_text(text: str) -> ExtractedInvoiceFields:
         gstin=gstin,
         purchase_order_reference=purchase_order_reference,
         payment_terms=payment_terms,
+        subtotal=subtotal,
+        tax_amount=tax_amount,
         missing_fields=missing_fields,
         warnings=warnings,
         extraction_confidence=confidence,
     )
 
 
-def parse_and_evaluate_pdf(pdf_bytes: bytes, filename: str = "invoice.pdf") -> InvoiceParseResponse:
+def parse_and_evaluate_pdf(
+    pdf_bytes: bytes,
+    filename: str = "invoice.pdf",
+    existing_invoices: list[Invoice] | None = None,
+) -> InvoiceParseResponse:
     """Extracts text from a PDF, parses fields, and connects cleanly into existing verification and risk engine."""
     text, error = extract_text_from_pdf(pdf_bytes)
     if error:
@@ -284,8 +324,6 @@ def parse_and_evaluate_pdf(pdf_bytes: bytes, filename: str = "invoice.pdf") -> I
         and extracted.supplier_name
         and extracted.buyer_name
         and extracted.amount
-        and extracted.issue_date
-        and extracted.due_date
     ):
         try:
             inv = Invoice(
@@ -299,19 +337,22 @@ def parse_and_evaluate_pdf(pdf_bytes: bytes, filename: str = "invoice.pdf") -> I
                 industry="Manufacturing",
                 gstin=extracted.gstin,
                 purchase_order_reference=extracted.purchase_order_reference,
+                subtotal=extracted.subtotal,
+                tax_amount=extracted.tax_amount,
                 buyer_rating=0.75,
                 supplier_history_months=24,
                 on_time_payment_ratio=0.86,
                 prior_defaults=0,
             )
-            eval_res = evaluate(inv)
-            # Update provenance to indicate PDF_UPLOAD
+            eval_res = evaluate(inv, existing_invoices)
+            # Update provenance to indicate SERVICE
             eval_res = eval_res.model_copy(update={"provenance": "SERVICE"})
             ledger_entry = create_risk_ledger_entry(
                 invoice=inv,
                 evaluation=eval_res,
                 source="PDF_UPLOAD",
                 source_filename=filename,
+                existing_invoices=existing_invoices,
             )
             return InvoiceParseResponse(
                 status="SUCCESS",

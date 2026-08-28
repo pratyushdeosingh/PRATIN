@@ -26,7 +26,7 @@ class IntegrationClient:
 
     async def invoice_evaluation(self, request: InvoiceEvaluationRequest):
         if self.settings.integration_mode == "fixture":
-            return evaluate(request.invoice).model_copy(update={"provenance": "FIXTURE"}), "FIXTURE"
+            return evaluate(request.invoice, request.existing_invoices).model_copy(update={"provenance": "FIXTURE"}), "FIXTURE"
         try:
             evaluation = await self._post(
                 f"{self.settings.invoice_risk_url}/evaluate", request, InvoiceEvaluation
@@ -35,7 +35,7 @@ class IntegrationClient:
         except (httpx.HTTPError, ValueError):
             if self.settings.integration_mode == "required":
                 raise
-            return evaluate(request.invoice).model_copy(update={"provenance": "FIXTURE"}), "DEGRADED_FIXTURE"
+            return evaluate(request.invoice, request.existing_invoices).model_copy(update={"provenance": "FIXTURE"}), "DEGRADED_FIXTURE"
 
     async def market(self, request: MarketRequest):
         if self.settings.integration_mode == "fixture":
@@ -50,15 +50,19 @@ class IntegrationClient:
                 raise
             return generate_market(request).model_copy(update={"provenance": "FIXTURE"}), "DEGRADED_FIXTURE"
 
-    async def parse_invoice_pdf(self, pdf_bytes: bytes, filename: str):
+    async def parse_invoice_pdf(self, pdf_bytes: bytes, filename: str, existing_invoices: list | None = None):
+        import json
         from contracts.models import InvoiceParseResponse
         if self.settings.integration_mode == "fixture":
             from services.invoice_risk.pdf_parser import parse_and_evaluate_pdf
-            return parse_and_evaluate_pdf(pdf_bytes, filename=filename), "FIXTURE"
+            return parse_and_evaluate_pdf(pdf_bytes, filename=filename, existing_invoices=existing_invoices), "FIXTURE"
         try:
             async with httpx.AsyncClient(timeout=self.settings.timeout, transport=self.transport) as client:
                 files = {"file": (filename, pdf_bytes, "application/pdf")}
-                response = await client.post(f"{self.settings.invoice_risk_url}/parse-invoice", files=files)
+                data = {}
+                if existing_invoices:
+                    data["existing_invoices"] = json.dumps([inv.model_dump(mode="json") for inv in existing_invoices])
+                response = await client.post(f"{self.settings.invoice_risk_url}/parse-invoice", files=files, data=data)
                 if response.status_code == 422:
                     return InvoiceParseResponse.model_validate(response.json()), "SERVICE"
                 response.raise_for_status()
@@ -67,4 +71,4 @@ class IntegrationClient:
             if self.settings.integration_mode == "required":
                 raise
             from services.invoice_risk.pdf_parser import parse_and_evaluate_pdf
-            return parse_and_evaluate_pdf(pdf_bytes, filename=filename), "DEGRADED_FIXTURE"
+            return parse_and_evaluate_pdf(pdf_bytes, filename=filename, existing_invoices=existing_invoices), "DEGRADED_FIXTURE"

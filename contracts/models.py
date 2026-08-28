@@ -32,11 +32,13 @@ class Invoice(StrictModel):
     buyer_name: str
     amount: float = Field(gt=0)
     currency: Literal["INR"] = "INR"
-    issue_date: date
-    due_date: date
-    industry: str
+    issue_date: date | None = None
+    due_date: date | None = None
+    industry: str = "Manufacturing"
     gstin: str | None = None
     purchase_order_reference: str | None = None
+    subtotal: float | None = None
+    tax_amount: float | None = None
     buyer_rating: float = Field(default=0.75, ge=0, le=1)
     supplier_history_months: int = Field(default=24, ge=0)
     on_time_payment_ratio: float = Field(default=0.86, ge=0, le=1)
@@ -44,7 +46,9 @@ class Invoice(StrictModel):
 
     @field_validator("due_date")
     @classmethod
-    def due_after_issue(cls, value: date, info):
+    def due_after_issue(cls, value: date | None, info):
+        if value is None:
+            return value
         issue = info.data.get("issue_date")
         if issue and value <= issue:
             raise ValueError("due_date must be after issue_date")
@@ -71,6 +75,13 @@ class OpportunityCreate(StrictModel):
         return value
 
 
+class DuplicateCheckResult(StrictModel):
+    duplicate_detected: bool = False
+    matched_invoice_number: str | None = None
+    matched_fields: list[str] = []
+    reasons: list[str] = []
+
+
 class VerificationResult(StrictModel):
     status: VerificationStatus
     confidence: float = Field(ge=0, le=1)
@@ -78,6 +89,8 @@ class VerificationResult(StrictModel):
     uncertain_fields: list[str]
     reasons: list[str]
     reason_codes: list[str] = []
+    duplicate_check: DuplicateCheckResult | None = None
+    consistency_warnings: list[str] = []
     simulation_notice: str = "Synthetic rule-based verification; not a banking, GST, KYC, or legal verification."
 
 
@@ -115,6 +128,8 @@ class ExtractedInvoiceFields(StrictModel):
     gstin: str | None = None
     purchase_order_reference: str | None = None
     payment_terms: str | None = None
+    subtotal: float | None = None
+    tax_amount: float | None = None
     missing_fields: list[str] = []
     warnings: list[str] = []
     extraction_confidence: ExtractionConfidence = ExtractionConfidence.LOW
@@ -131,6 +146,7 @@ class InvoiceParseResponse(StrictModel):
 
 class InvoiceEvaluationRequest(StrictModel):
     invoice: Invoice
+    existing_invoices: list[Invoice] = []
 
 
 class InvoiceEvaluation(StrictModel):

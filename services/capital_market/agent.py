@@ -226,7 +226,11 @@ def evaluate_attractiveness(ctx: dict) -> AttractivenessAssessment:
         ))
 
     # 7. Tenor fit (shorter is better; do not exceed invoice economic life)
-    days_to_due = (invoice.due_date - invoice.issue_date).days
+    if invoice.due_date and invoice.issue_date:
+        days_to_due = (invoice.due_date - invoice.issue_date).days
+    else:
+        days_to_due = requirements.desired_tenor_days
+
     if days_to_due <= 0:
         tenor_score = 0.0
         tenor_note = "Invoice is already past due."
@@ -440,8 +444,11 @@ def price(ctx: dict, attractiveness: AttractivenessAssessment) -> tuple[PricingD
 
     # --- Tenor ------------------------------------------------------------
     tenor = requirements.desired_tenor_days + market.tenor_adjustment_days
-    days_to_due = (invoice.due_date - invoice.issue_date).days
-    tenor = max(1, min(tenor, days_to_due)) if days_to_due > 0 else max(1, tenor)
+    if invoice.due_date and invoice.issue_date:
+        days_to_due = (invoice.due_date - invoice.issue_date).days
+        tenor = max(1, min(tenor, days_to_due)) if days_to_due > 0 else max(1, tenor)
+    else:
+        tenor = max(1, tenor)
 
     # --- Annual financing rate --------------------------------------------
     risk_premium = round(ctx["risk"].score * (0.055 if provider.provider_type == "BANK" else 0.07) / 10.0, 2)
