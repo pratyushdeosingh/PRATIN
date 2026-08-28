@@ -140,3 +140,136 @@ docs/                    Architecture, demo script, integration and judging note
 PRATIN is a demonstrator, not a production finance platform. Real deployment requires regulated data/settlement integrations, KYC/KYB and e-invoice validation, fraud controls, RBAC, encryption and key management, observability, model governance, privacy controls, and legal/compliance review.
 
 Named for Pratyush, Pratham, and Nitin. See the [team guide](docs/team-start-here.md), [architecture notes](docs/architecture.md), and [demo script](docs/demo-script.md).
+
+---
+
+## Detailed component guide
+
+### 1. Shared contracts: the trust boundary
+
+[`contracts/models.py`](contracts/models.py) is the API contract shared by Core and both backend agents. It defines invoices, financing requirements, verification/risk assessments, providers, offers, match decisions, settlements, ledger entries, and PDF parse responses. Models reject unknown fields, so a service cannot silently introduce data the orchestrator does not understand.
+
+This has two important effects:
+
+1. Core serializes outgoing requests with JSON-safe Pydantic output.
+2. Core revalidates every HTTP response before using it for matching or storage.
+
+In other words, a successful HTTP response alone is insufficient; the response must also satisfy the marketplace contract.
+
+### 2. Core API and orchestrator
+
+[`backend/app/main.py`](backend/app/main.py) owns the marketplace lifecycle. It creates opportunities, obtains the current provider state, calls the Risk and Capital services, applies supplier-side matching, stores audit events, and accepts settlements. The UI never decides the winner itself.
+
+The most important lifecycle is:
+
+```text
+create opportunity
+  → evaluate invoice
+  → snapshot current providers
+  → request provider offers
+  → apply supplier hard constraints and rank eligible offers
+  → accept one recommended offer
+  → atomically update provider + opportunity + settlement + audit
+```
+
+The PDF route follows the same trust model. Core checks file type and a 10 MB limit, forwards the bytes to Invoice & Risk, then persists a validated opportunity and audit events only when a usable invoice/evaluation is returned.
+
+### 3. Invoice & Risk Agent
+
+[`services/invoice_risk/`](services/invoice_risk/) separates three jobs:
+
+| Module | Responsibility |
+|---|---|
+| `pdf_parser.py` | Reads embedded PDF text in memory and normalizes common fields such as invoice number, buyer, supplier, amount, dates, GSTIN, PO reference, and payment terms. |
+| `engine.py` | Performs synthetic consistency checks, records uncertainty, calculates deterministic risk factors, and creates ledger-ready results. |
+| `app.py` | Exposes `/verify`, `/evaluate`, `/ledger-entry`, and multipart `/parse-invoice` through FastAPI. |
+
+PDF extraction is deliberately conservative. A successful response includes extraction confidence and warnings; an unreadable, empty, or invalid document yields a clear status rather than guessed data. PDF-derived opportunities are marked in the Risk Ledger with their source filename.
+
+Verification and risk output are explanatory—not evidence of banking, legal, GST, KYC, or fraud validation. They are deterministic synthetic policy results designed to make the decision path inspectable.
+
+### 4. Capital Market Agents
+
+[`services/capital_market/agent.py`](services/capital_market/agent.py) models each capital provider as an independent deterministic decision-maker. It does not simply calculate a rate for every invoice. Each provider evaluates:
+
+| Stage | What it does |
+|---|---|
+| Observe | Builds a consistent view of invoice, supplier mandate, provider state, risk, and market regime. |
+| Evaluate | Produces an attractiveness score and explanatory factors. |
+| Constrain | Applies non-negotiable gates: verification, risk appetite, liquidity, ticket size, and concentration. |
+| Decide | Returns an explicit offer or decline. |
+| Price | Computes advance rate, financed amount, rate decomposition, fees, interest, total cost, and expected return. |
+| Explain | Records the reasons for participation, decline, sector fit, liquidity, price, and portfolio impact. |
+| Act | Maps the analysis into the strict public `Offer` contract. |
+
+[`market_data.py`](services/capital_market/market_data.py) provides a clearly labelled synthetic market-regime layer: `FAVORABLE`, `NEUTRAL`, `CAUTIOUS`, or `STRESSED`. Its single loading point is intentionally where a future external feed could be integrated. Today it returns deterministic demo conditions and never claims real market data.
+
+[`engine.py`](services/capital_market/engine.py) preserves the canonical `MarketRequest → MarketResponse` contract. `app.py` additionally exposes `POST /analysis`, a scoped endpoint for the cockpit that serializes hard-gate results, attractiveness, pricing decomposition, terms, market context, and provider state.
+
+### 5. Matching: supplier mandate versus provider offer
+
+[`backend/app/matching.py`](backend/app/matching.py) is deliberately separate from the provider agents. Providers decide whether and how they participate; Core decides whether an offer actually meets the supplier's mandate.
+
+An offer is ineligible when it is a provider decline or misses the required capital, settlement ceiling, or optional supplier cost ceiling. Only eligible offers are scored. The current `matching-policy-1.1-demo` is:
+
+| Factor | Weight | Meaning |
+|---|---:|---|
+| Usable capital | 28% | Ability to exceed the supplier funding floor |
+| Total effective cost | 32% | Interest plus fees over the requested tenor |
+| Settlement speed | 16% | Fit with the supplier deadline |
+| Tenor | 8% | Fit with requested duration |
+| Risk-adjusted return | 8% | Provider return in the context of invoice risk |
+| Remaining liquidity | 8% | Provider capacity remaining before allocation |
+
+The API returns every factor's raw score, weight, explanation, weighted suitability, hard-constraint failures, rank, recommendation reasons, and policy version. The weights sum to 100%; they are demo policy parameters, not a production credit model.
+
+### 6. Persistence, state, and settlement
+
+The store abstraction is selected by [`backend/app/store_factory.py`](backend/app/store_factory.py):
+
+| Backend | When used | Purpose |
+|---|---|---|
+| SQLite | Default local/offline path and tests | Deterministic durable demo state at `PRATIN_DB_PATH` |
+| Supabase Postgres | When explicitly configured with a server-only URL | Private `pratin` schema for durable marketplace state |
+
+Both stores own opportunities, providers, settlements, and audit events. A settlement is idempotent: accepting the same recommended offer again returns the original settlement rather than subtracting liquidity twice. Before the mutation, the backend rechecks the recommendation and current mutable provider capacity, preventing stale offers from being accepted. Postgres performs the corresponding work in a transaction with row locking; SQLite implements the same store contract for the offline demo.
+
+### 7. Integration modes and failure behavior
+
+Core's [`Settings`](backend/app/config.py) controls service calls and persistence:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PRATIN_INTEGRATION_MODE` | `auto` | `required`, `auto`, or `fixture` |
+| `INVOICE_RISK_URL` | `http://127.0.0.1:8001` | Invoice & Risk service URL |
+| `CAPITAL_MARKET_URL` | `http://127.0.0.1:8002` | Capital service URL |
+| `SERVICE_TIMEOUT_SECONDS` | `3` | HTTP timeout |
+| `PRATIN_DATABASE_BACKEND` | inferred | `sqlite` or `supabase` |
+| `PRATIN_DB_PATH` | `data/pratin.db` | SQLite state location |
+| `SUPABASE_DATABASE_URL` | unset | Server-only Postgres connection string |
+| `VITE_API_BASE_URL` | `http://127.0.0.1:8000` | Browser-to-Core URL |
+
+`required` raises service failures rather than substituting an answer. `fixture` makes no HTTP calls and uses the in-process deterministic engines. `auto` prefers services but falls back only on a failed request, marking the result `DEGRADED_FIXTURE`. This distinction is visible in the UI and response integration status.
+
+### 8. React cockpit
+
+[`frontend/src/App.tsx`](frontend/src/App.tsx) is a command-and-observability surface, not an alternate decision engine:
+
+- **Market pulse** starts the canonical two-allocation story, renders ranked offers, accepts the recommended offer, and displays before/after provider state.
+- **Opportunities** lists durable Core API history.
+- **Risk ledger** reads persisted evaluations and submits PDF uploads through Core.
+- **Capital agents** calls `/analysis` and renders provider-level offers/declines, constraints, price lines, terms, and state.
+
+[`frontend/src/api.ts`](frontend/src/api.ts) centralizes typed client calls and error handling. The frontend shows retryable request errors and avoids fabricating metrics or decisions when a service is unavailable.
+
+### 9. Deployment and test design
+
+[`docker-compose.yml`](docker-compose.yml) builds the four services, wires Core to the two backend agents through Compose DNS, persists SQLite data in the `pratin-data` volume, and health-checks Core, Invoice & Risk, and Capital Market before dependent services start.
+
+The tests are intentionally layered:
+
+1. Unit/contract tests exercise risk, parsing, agent constraints/pricing, matching, storage, and API behavior.
+2. Frontend tests exercise the visible cockpit states.
+3. The production build runs TypeScript validation and Vite bundling.
+4. `backend.app.integration_check` drives the live required-mode story and verifies the stateful second allocation.
+5. Optional Postgres tests run when `PRATIN_TEST_POSTGRES_URL` is available.
