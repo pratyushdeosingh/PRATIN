@@ -30,11 +30,14 @@ export default function App(){
  const agentLatency=useMemo(()=>phase==='running'?'clearing now…':'agents evaluated deterministically',[phase])
  return <div className="shell"><aside className="rail"><div className="brand"><span>P</span><div>PRATIN<small>CAPITAL NETWORK</small></div></div><nav><button className={view==='pulse'?'active':''} onClick={()=>setView('pulse')}><Gauge/>Market pulse</button><button><Radar/>Opportunities</button><button className={view==='capital-agents'?'active':''} onClick={()=>setView('capital-agents')}><Landmark/>Capital agents</button><button className={view==='risk-ledger'?'active':''} onClick={()=>setView('risk-ledger')}><ShieldCheck/>Risk ledger</button></nav><div className="rail-foot"><span className="live-dot"/> MARKET ONLINE<small>Demo rail • No real funds</small></div></aside>
  {view==='capital-agents'?<CapitalAgents/>:view==='risk-ledger'?(
-  <main><header><div><p className="eyebrow">DURABLE AUDIT • EXPLAINABLE EVALUATIONS</p><h1>Invoice Risk <em>Ledger.</em></h1><p className="lede">Every invoice risk evaluation is durably logged with factor-level explainability, uncertainty parameters, and policy versions.</p></div></header>
+  <main><header><div><p className="eyebrow">DURABLE AUDIT • EXPLAINABLE EVALUATIONS</p><h1>Invoice Risk <em>Ledger.</em></h1><p className="lede">Every invoice risk evaluation is durably logged with factor-level explainability, structured reason codes, uncertainty parameters, and policy versions.</p></div><button className="primary" onClick={refreshLedger}><RotateCcw/> Refresh ledger</button></header>
   {error&&<div className="error-banner">Integration failed visibly: {error}. Start the backend or use Docker Compose.</div>}
   <section className="ledger-grid">
    {ledgerEntries.length===0?(
-    <div className="empty-ledger">No risk evaluations in ledger yet. Run the market from "Market pulse" to generate evaluation history.</div>
+    <div className="empty-ledger">
+     <p>No risk evaluations in ledger yet.</p>
+     <button className="primary" style={{margin:'14px auto 0'}} onClick={run}><Bolt/> Run market evaluation</button>
+    </div>
    ):(
     ledgerEntries.map(entry=>(
      <article className="ledger-entry" key={entry.id}>
@@ -46,11 +49,21 @@ export default function App(){
        </div>
        <div className="risk"><span>{entry.risk.band} RISK</span><b>{entry.risk.score}</b><small>/100</small></div>
       </div>
+      {entry.verification.reason_codes&&entry.verification.reason_codes.length>0&&(
+       <div className="tag-list" style={{marginBottom:12}}>
+        <span className="eyebrow" style={{marginRight:8}}>VERIFICATION CODES:</span>
+        {entry.verification.reason_codes.map(code=><span key={code} className="uncertainty-tag" style={{borderColor:'#37725f',color:'#204b3e',background:'#eaf4ef'}}>{code}</span>)}
+       </div>
+      )}
       <div className="eyebrow">FACTOR-LEVEL EXPLAINABILITY ({entry.risk.factors.length} FACTORS)</div>
       <div className="ledger-factors">
        {entry.risk.factors.map((f,idx)=>(
         <div key={idx} className={`factor-card ${f.impact}`}>
-         <div className="factor-title"><span>{f.label}</span><b>{f.points>0?`+${f.points}`:f.points}</b></div>
+         <div className="factor-title">
+          <span>{f.label}</span>
+          <b>{f.points>0?`+${f.points}`:f.points}</b>
+         </div>
+         {f.reason_code&&<div style={{fontSize:9,fontWeight:700,letterSpacing:'0.04em',color:f.impact==='positive'?'#2e6935':f.impact==='negative'?'#8c3f35':'#526c63',marginBottom:4}}>{f.reason_code}</div>}
          <p className="factor-desc">{f.explanation}</p>
         </div>
        ))}

@@ -1,7 +1,7 @@
 export type Offer={id:string;provider_id:string;provider_name:string;provider_type:string;status:'OFFER'|'DECLINE';annual_rate:number|null;financed_amount:number|null;fees:number|null;settlement_hours:number|null;total_effective_cost:number|null;reasons:string[]}
 export type RankedOffer={offer:Offer;eligible:boolean;suitability_score:number;hard_constraint_failures:string[];rank:number|null}
-export type RiskFactor={label:string;impact:'positive'|'negative'|'neutral';points:number;explanation:string}
-export type VerificationResult={status:string;confidence:number;verified_fields:string[];uncertain_fields:string[];reasons:string[];simulation_notice?:string}
+export type RiskFactor={label:string;impact:'positive'|'negative'|'neutral';points:number;explanation:string;reason_code?:string}
+export type VerificationResult={status:string;confidence:number;verified_fields:string[];uncertain_fields:string[];reasons:string[];reason_codes?:string[];simulation_notice?:string}
 export type RiskAssessment={score:number;band:string;confidence:number;factors:RiskFactor[];missing_information:string[];policy_version:string}
 export type RiskLedgerEntry={id:string;opportunity_id:string|null;invoice_number:string;supplier_name:string;buyer_name:string;amount:number;evaluated_at:string;verification:VerificationResult;risk:RiskAssessment;provenance:'SERVICE'|'FIXTURE'}
 export type Opportunity={id:string;status:string;invoice:{invoice_number:string;supplier_name:string;buyer_name:string;amount:number};requirements:{minimum_amount:number;max_settlement_hours:number;desired_tenor_days:number};evaluation?:{verification:VerificationResult;risk:RiskAssessment};match?:{recommended_offer_id:string|null;ranked_offers:RankedOffer[];recommendation_reasons:string[]};integration_status:Record<string,string>}

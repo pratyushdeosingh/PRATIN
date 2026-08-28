@@ -77,6 +77,7 @@ class VerificationResult(StrictModel):
     verified_fields: list[str]
     uncertain_fields: list[str]
     reasons: list[str]
+    reason_codes: list[str] = []
     simulation_notice: str = "Synthetic rule-based verification; not a banking, GST, KYC, or legal verification."
 
 
@@ -85,6 +86,7 @@ class RiskFactor(StrictModel):
     impact: Literal["positive", "negative", "neutral"]
     points: float
     explanation: str
+    reason_code: str | None = None
 
 
 class RiskAssessment(StrictModel):
