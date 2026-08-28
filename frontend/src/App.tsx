@@ -1,10 +1,12 @@
-import {useMemo,useState} from 'react'
+import {useEffect,useMemo,useState} from 'react'
 import {ArrowRight,BadgeCheck,Bolt,Building2,CircleDollarSign,Gauge,Landmark,Radar,RotateCcw,ShieldCheck,Sparkles} from 'lucide-react'
-import {api,AuditEvent,IntegrationStatus,Metrics,Opportunity,Provider,RankedOffer,Settlement} from './api'
+import {api,AuditEvent,IntegrationStatus,Metrics,Opportunity,Provider,RankedOffer,RiskLedgerEntry,Settlement} from './api'
+import CapitalAgents from './CapitalAgents'
 
 export const money=(n:number)=>new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(n)
 const lifecycle=['Invoice','Verify','Assess risk','Discover','Compete','Match','Finance','Settle','Reallocate']
 type Phase='idle'|'loading'|'ready'|'settling'|'settled'|'rerunning'|'completed'|'error'
+type View='pulse'|'capital-agents'|'risk-ledger'
 type AllocationHistory={sequence:number;invoice:string;provider:string;rate:number|null;amount:number|null;liquidityBefore?:number;liquidityAfter?:number;exposureBefore?:number;exposureAfter?:number}
 type Receipt={settlement:Settlement;before:Provider;after:Provider}
 
@@ -12,6 +14,8 @@ const provenanceLabel=(status?:IntegrationStatus)=>status?.replace('_',' ')||'UN
 const provenanceClass=(status?:IntegrationStatus)=>status==='SERVICE'?'service':status==='DEGRADED_FIXTURE'?'degraded':status==='FIXTURE'?'fixture':'unavailable'
 
 export default function App(){
+ const [view,setView]=useState<View>('pulse')
+ const [ledgerEntries,setLedgerEntries]=useState<RiskLedgerEntry[]>([])
  const [opportunity,setOpportunity]=useState<Opportunity|null>(null)
  const [metrics,setMetrics]=useState<Metrics|null>(null)
  const [providers,setProviders]=useState<Provider[]>([])
@@ -29,13 +33,16 @@ export default function App(){
  const busy=phase==='loading'||phase==='settling'||phase==='rerunning'
  const activeStep={idle:0,loading:3,ready:6,settling:7,settled:8,rerunning:4,completed:9,error:0}[phase]
 
+ const refreshLedger=async()=>{const entries=await api.riskLedger();setLedgerEntries(entries)}
+ useEffect(()=>{if(view==='risk-ledger')void refreshLedger().catch(e=>setError(e instanceof Error?e.message:'Risk ledger failed'))},[view])
  const refresh=async()=>{
   const [nextMetrics,nextProviders,nextAudit,health]=await Promise.all([api.metrics(),api.providers(),api.audit(),api.health()])
   setMetrics(nextMetrics);setProviders(nextProviders);setAudit(nextAudit);setDatabase(health.database)
+  void refreshLedger().catch(()=>undefined)
   return nextProviders
  }
  const run=async()=>{
-  setError('');setPhase('loading');setOpportunity(null);setMetrics(null);setProviders([]);setAudit([]);setHistory([]);setReceipt(null);setDatabase(null)
+  setError('');setPhase('loading');setOpportunity(null);setMetrics(null);setProviders([]);setAudit([]);setHistory([]);setReceipt(null);setDatabase(null);setLedgerEntries([])
   try{
    await api.reset()
    const scenarios=await api.scenarios()
@@ -81,8 +88,8 @@ export default function App(){
  const risk=opportunity?.evaluation?.risk
  const verification=opportunity?.evaluation?.verification
 
- return <div className="shell"><aside className="rail"><div className="brand"><span>P</span><div>PRATIN<small>CAPITAL NETWORK</small></div></div><nav><button className="active"><Gauge/>Market pulse</button><button><Radar/>Opportunities</button><button><Landmark/>Capital agents</button><button><ShieldCheck/>Risk ledger</button></nav><div className="rail-foot"><span className="live-dot"/> MARKET READY<small>Synthetic demo • No real funds</small></div></aside>
- <main><header><div><p className="eyebrow">CONTINUOUS CLEARING • STATEFUL DEMO MARKET</p><h1>Capital, intelligently <em>allocated.</em></h1><p className="lede">Every verified invoice enters a competitive market where autonomous providers price risk, protect portfolios and race to satisfy the supplier.</p></div><button className="primary" onClick={primaryAction} disabled={busy}>{busy?<RotateCcw className="spin"/>:<Bolt/>}{primaryLabel}</button></header>
+ return <div className="shell"><aside className="rail"><div className="brand"><span>P</span><div>PRATIN<small>CAPITAL NETWORK</small></div></div><nav><button className={view==='pulse'?'active':''} onClick={()=>setView('pulse')}><Gauge/>Market pulse</button><button><Radar/>Opportunities</button><button className={view==='capital-agents'?'active':''} onClick={()=>setView('capital-agents')}><Landmark/>Capital agents</button><button className={view==='risk-ledger'?'active':''} onClick={()=>setView('risk-ledger')}><ShieldCheck/>Risk ledger</button></nav><div className="rail-foot"><span className="live-dot"/> MARKET READY<small>Synthetic demo • No real funds</small></div></aside>
+ {view==='capital-agents'?<CapitalAgents/>:view==='risk-ledger'?<RiskLedger entries={ledgerEntries} error={error}/>:<main><header><div><p className="eyebrow">CONTINUOUS CLEARING • STATEFUL DEMO MARKET</p><h1>Capital, intelligently <em>allocated.</em></h1><p className="lede">Every verified invoice enters a competitive market where autonomous providers price risk, protect portfolios and race to satisfy the supplier.</p></div><button className="primary" onClick={primaryAction} disabled={busy}>{busy?<RotateCcw className="spin"/>:<Bolt/>}{primaryLabel}</button></header>
  {error&&<div className="error-banner" role="alert"><strong>Request failed.</strong> {error} <button onClick={retryAction} disabled={busy}>Retry safely</button></div>}
  <section className="provenance" aria-label="Integration provenance"><div><small>INVOICE / RISK AGENT</small><span className={provenanceClass(opportunity?.integration_status.invoice_risk)}>● {provenanceLabel(opportunity?.integration_status.invoice_risk)}</span></div><div><small>CAPITAL MARKET AGENTS</small><span className={provenanceClass(opportunity?.integration_status.capital_market)}>● {provenanceLabel(opportunity?.integration_status.capital_market)}</span></div><div><small>MARKET STATE</small><span className={database==='supabase-postgres'?'service':database?'fixture':'unavailable'}>● {database==='supabase-postgres'?'SUPABASE POSTGRES':database==='sqlite'?'SQLITE OFFLINE':'UNAVAILABLE'}</span></div><p>{!opportunity?'No market response received yet.':Object.values(opportunity.integration_status).includes('DEGRADED_FIXTURE')?'A service was unavailable; deterministic fixtures are clearly shown.':Object.values(opportunity.integration_status).every(x=>x==='SERVICE')?'Both responses came through validated HTTP service contracts.':'Deterministic fixture mode is active; these are not external service responses.'}</p></section>
  <section className="ticker">{lifecycle.map((x,i)=><div key={x} className={i<activeStep?'done':i===activeStep?'now':''}><span>{i<activeStep?'✓':i+1}</span>{x}{i<lifecycle.length-1&&<ArrowRight/>}</div>)}</section>
@@ -98,7 +105,14 @@ export default function App(){
  {receipt&&<section className="settlement-proof"><div><p className="eyebrow">SIMULATED SETTLEMENT • {receipt.settlement.id}</p><h2>One atomic write changed the next market.</h2><p>{receipt.settlement.notice}</p></div><dl><div><dt>Provider liquidity</dt><dd>{money(receipt.before.available_liquidity)} <ArrowRight/> <strong>{money(receipt.after.available_liquidity)}</strong></dd></div><div><dt>Provider exposure</dt><dd>{money(receipt.before.current_exposure)} <ArrowRight/> <strong>{money(receipt.after.current_exposure)}</strong></dd></div></dl></section>}
  {history.length>0&&<section className="allocation-history"><p className="eyebrow">CAUSAL ALLOCATION HISTORY</p><div className="history-flow">{history.map((item,index)=><div key={item.sequence} className="history-item"><small>ALLOCATION {item.sequence}</small><strong>{item.provider}</strong><span>{item.invoice} • {item.amount?money(item.amount):'—'} • {item.rate??'—'}%</span>{item.liquidityBefore!==undefined&&<em>Liquidity {money(item.liquidityBefore)} → {money(item.liquidityAfter||0)}</em>}{index<history.length-1&&<ArrowRight/>}</div>)}</div>{history.length===1&&phase==='settled'&&<p className="history-hint">Provider liquidity and exposure changed. Run the next allocation to see the market adapt.</p>}{history.length===2&&<p className="history-hint success">VegaFlow → state mutation → Meridian. The second winner changed because settlement changed provider capacity.</p>}</section>}
  {audit.length>0&&<section className="audit-timeline"><p className="eyebrow">RECENT BACKEND AUDIT EVENTS</p>{audit.slice(0,4).map(event=><div key={event.id}><span>{event.event_type.replaceAll('_',' ')}</span><p>{event.detail}</p><small>{event.id}</small></div>)}</section>}
- </main></div>
+ </main>}
+ </div>
+}
+
+function RiskLedger({entries,error}:{entries:RiskLedgerEntry[];error:string}){
+ return <main><header><div><p className="eyebrow">DURABLE AUDIT • EXPLAINABLE EVALUATIONS</p><h1>Invoice Risk <em>Ledger.</em></h1><p className="lede">Every completed risk evaluation is derived from durable backend opportunity state, with factor-level explanations and explicit provenance.</p></div></header>
+ {error&&<div className="error-banner" role="alert">Risk ledger unavailable: {error}</div>}
+ <section className="ledger-grid">{entries.length===0?<div className="empty-ledger">No risk evaluations in the ledger yet. Run the market from Market pulse to generate evaluation history.</div>:entries.map(entry=><article className="ledger-entry" key={entry.id}><div className="ledger-header"><div><div className="card-label"><BadgeCheck/> {entry.verification.status} • {Math.round(entry.verification.confidence*100)}% CONFIDENCE • {entry.id}</div><h3>{entry.invoice_number} — {money(entry.amount)}</h3><p>{entry.supplier_name} → {entry.buyer_name} • Evaluated {new Date(entry.evaluated_at).toLocaleString()}</p></div><div className="risk"><span>{entry.risk.band} RISK</span><b>{entry.risk.score}</b><small>/100</small></div></div><div className="eyebrow">FACTOR-LEVEL EXPLAINABILITY ({entry.risk.factors.length} FACTORS)</div><div className="ledger-factors">{entry.risk.factors.map(factor=><div key={factor.label} className={`factor-card ${factor.impact}`}><div className="factor-title"><span>{factor.label}</span><b>{factor.points>0?`+${factor.points}`:factor.points}</b></div><p className="factor-desc">{factor.explanation}</p></div>)}</div>{entry.verification.uncertain_fields.length>0&&<div className="tag-list"><span className="eyebrow" style={{marginRight:8}}>UNCERTAINTY:</span>{entry.verification.uncertain_fields.map(field=><span key={field} className="uncertainty-tag">{field}</span>)}</div>}<footer style={{marginTop:12,fontSize:10,color:'#719087'}}><ShieldCheck style={{width:14,verticalAlign:'middle',marginRight:4}}/> Policy: {entry.risk.policy_version} • Provenance: {entry.provenance} • Synthetic assessment</footer></article>)}</section></main>
 }
 
 function ProviderOffer({ranked,winnerId,lowestRate}:{ranked:RankedOffer;winnerId?:string;lowestRate:number}){

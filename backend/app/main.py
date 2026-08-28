@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from contracts.models import (AuditEvent, InvoiceEvaluationRequest, MarketRequest, OpportunityCreate,
-    OpportunityRecord, PlatformMetrics, Provider, Settlement, utc_now)
+    OpportunityRecord, PlatformMetrics, Provider, RiskLedgerEntry, Settlement, utc_now)
 from .config import Settings
 from .fixtures import scenarios
 from .matching import rank_offers
@@ -55,7 +55,9 @@ async def clear_market(item_id: str) -> OpportunityRecord:
                            {provider.id: provider.available_liquidity for provider in providers})
     item = item.model_copy(update={"status": "MARKET_RUN", "evaluation": evaluation, "offers": market.offers,
         "match": decision, "integration_status": {"invoice_risk": risk_status, "capital_market": market_status}})
-    store.save_opportunity(item); store.audit("MARKET_CLEARED", f"{len(market.offers)} providers evaluated; recommendation {decision.recommended_offer_id or 'none'}.", item.id)
+    store.save_opportunity(item)
+    store.audit("RISK_EVALUATED", f"Invoice {item.invoice.invoice_number} verified ({evaluation.verification.status.value}) with {evaluation.risk.band.value} risk score {evaluation.risk.score}/100.", item.id)
+    store.audit("MARKET_CLEARED", f"{len(market.offers)} providers evaluated; recommendation {decision.recommended_offer_id or 'none'}.", item.id)
     return item
 
 @app.post("/api/opportunities/{item_id}/run-market", response_model=OpportunityRecord)
@@ -77,6 +79,17 @@ def get_settlements(): return store.settlements()
 
 @app.get("/api/audit", response_model=list[AuditEvent])
 def get_audit(): return store.audits()
+
+@app.get("/api/risk-ledger", response_model=list[RiskLedgerEntry])
+def list_risk_ledger():
+    return store.risk_ledger_entries()
+
+@app.get("/api/risk-ledger/{item_id}", response_model=RiskLedgerEntry)
+def get_risk_ledger_entry(item_id: str):
+    entry = store.risk_ledger_entry(item_id)
+    if not entry:
+        raise HTTPException(404, "Risk ledger entry not found")
+    return entry
 
 @app.get("/api/platform/metrics", response_model=PlatformMetrics)
 def metrics():

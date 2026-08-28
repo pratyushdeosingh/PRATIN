@@ -4,7 +4,7 @@ from uuid import uuid4
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
 
-from contracts.models import AuditEvent, OpportunityRecord, Provider, Settlement, utc_now
+from contracts.models import AuditEvent, OpportunityRecord, Provider, RiskLedgerEntry, Settlement, utc_now
 from .fixtures import providers as fixture_providers
 
 
@@ -229,3 +229,31 @@ class PostgresStore:
                 "select payload from pratin.audit_events order by timestamp desc, id desc"
             ).fetchall()
         return [_validate(AuditEvent, row[0]) for row in rows]
+
+    def risk_ledger_entries(self) -> list[RiskLedgerEntry]:
+        return [
+            RiskLedgerEntry(
+                id="RSK-" + opportunity.id.removeprefix("OPP-"),
+                opportunity_id=opportunity.id,
+                invoice_number=opportunity.invoice.invoice_number,
+                supplier_name=opportunity.invoice.supplier_name,
+                buyer_name=opportunity.invoice.buyer_name,
+                amount=opportunity.invoice.amount,
+                evaluated_at=opportunity.created_at,
+                verification=opportunity.evaluation.verification,
+                risk=opportunity.evaluation.risk,
+                provenance=opportunity.evaluation.provenance,
+            )
+            for opportunity in self.opportunities()
+            if opportunity.evaluation
+        ]
+
+    def risk_ledger_entry(self, identifier: str) -> RiskLedgerEntry | None:
+        return next(
+            (
+                entry
+                for entry in self.risk_ledger_entries()
+                if entry.id == identifier or entry.opportunity_id == identifier
+            ),
+            None,
+        )
