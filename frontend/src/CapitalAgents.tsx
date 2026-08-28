@@ -30,23 +30,17 @@ type CompanyResearch={name:string;status:'live'|'cached'|'unavailable';source_ur
 type Companies={seller:CompanyResearch;client:CompanyResearch;telemetry:{searches:number;pages_scraped:number;cache_hits:number;cache_misses:number}}
 type Payload={offers:Analysis[];research:{research:Research;providers:Intelligence[];rate_adjustment:number;advance_adjustment:number}|null;companies:Companies|null;trace:Trace|null}
 
+// Real invoice + risk context the agent needs. Sourced either from a parsed
+// PDF upload or from the latest real opportunity in the marketplace.
+type MarketInput={
+ invoice:{invoice_number?:string;supplier_name?:string;buyer_name?:string;amount:number;industry?:string;[key:string]:unknown}
+ requirements:{minimum_amount:number;max_settlement_hours:number;desired_tenor_days:number}
+ verification:Record<string,unknown>
+ risk:{score:number;band:string;[key:string]:unknown}
+}
+
 const base=import.meta.env.VITE_CAPITAL_MARKET_URL||'http://127.0.0.1:8002'
 const apiBase=import.meta.env.VITE_API_BASE_URL||'http://127.0.0.1:8000'
-
-// Manual MarketRequest payload mirroring the backend demo fixtures (urgent scenario).
-const sampleRequest={
- opportunity_id:'OPP-CAPITAL-AGENTS',
- invoice:{invoice_number:'INV-PRATIN-1001',supplier_name:'Shakti Components',buyer_name:'Orion Auto Systems',amount:1000000,currency:'INR',issue_date:'2026-08-20',due_date:'2026-10-19',industry:'Manufacturing',gstin:'27ABCDE1234F1Z5',purchase_order_reference:'PO-2026-1188',buyer_rating:0.88,supplier_history_months:38,on_time_payment_ratio:0.93,prior_defaults:0},
- requirements:{minimum_amount:800000,max_settlement_hours:48,desired_tenor_days:60},
- verification:{status:'VERIFIED',confidence:0.95,verified_fields:['invoice_number','supplier_name','buyer_name','amount','issue_date','due_date'],uncertain_fields:[],reasons:['Invoice fields are internally consistent under the synthetic verification policy.']},
- risk:{score:24,band:'LOW',confidence:0.9,factors:[],missing_information:[]},
- providers:[
-  {id:'bank-a',name:'Astra Commercial Bank',provider_type:'BANK',available_liquidity:5000000,risk_appetite:42,min_return_rate:8.2,max_ticket_size:700000,preferred_industries:['Manufacturing','Automotive'],settlement_hours:96,max_concentration_ratio:0.60,current_exposure:900000,portfolio_capacity:8000000,base_advance_rate:0.70,fee_rate:0.002},
-  {id:'nbfc-b',name:'VegaFlow NBFC',provider_type:'NBFC',available_liquidity:1650000,risk_appetite:68,min_return_rate:9.4,max_ticket_size:1500000,preferred_industries:['Manufacturing','Logistics','Retail'],settlement_hours:24,max_concentration_ratio:0.72,current_exposure:1300000,portfolio_capacity:6000000,base_advance_rate:0.85,fee_rate:0.008},
-  {id:'fintech-c',name:'PulseTrade Capital',provider_type:'FINTECH',available_liquidity:2400000,risk_appetite:78,min_return_rate:10.5,max_ticket_size:1200000,preferred_industries:['Technology','Retail'],settlement_hours:2,max_concentration_ratio:0.82,current_exposure:1100000,portfolio_capacity:4000000,base_advance_rate:0.92,fee_rate:0.04},
-  {id:'fund-d',name:'Meridian Yield Fund',provider_type:'FUND',available_liquidity:6000000,risk_appetite:58,min_return_rate:10.1,max_ticket_size:2500000,preferred_industries:['Pharma','Automotive'],settlement_hours:48,max_concentration_ratio:0.50,current_exposure:2600000,portfolio_capacity:10000000,base_advance_rate:0.80,fee_rate:0.012},
- ],
-}
 
 const traceIcon=(state:string)=>{
  if(state==='done')return <span className="trace-mark done">✓</span>
@@ -64,36 +58,33 @@ export default function CapitalAgents({providers,error:providerError}:{providers
  const [file,setFile]=useState<File|null>(null)
  const [parsing,setParsing]=useState(false)
  const [parseError,setParseError]=useState('')
- const [invoiceCtx,setInvoiceCtx]=useState<{seller:string;client:string;amount:number}|null>(null)
+ const [marketInput,setMarketInput]=useState<MarketInput|null>(null)
 
- const parseAndRun=async(parsedFile:File)=>{
-  setParsing(true);setParseError('')
-  try{
-   const formData=new FormData()
-   formData.append('file',parsedFile)
-   const res=await fetch(`${apiBase}/api/invoices/parse-pdf`,{method:'POST',body:formData})
-   const parseBody=await res.json().catch(()=>null)
-   if(!res.ok)throw new Error(parseBody&&typeof parseBody==='object'&&'detail' in parseBody?String(parseBody.detail):`Invoice parse failed: ${res.status}`)
-   const fields=parseBody?.extracted_fields
-   if(!fields||!fields.supplier_name||!fields.buyer_name||!fields.amount)throw new Error('Invoice parsed but seller, client or amount is missing.')
-   setInvoiceCtx({seller:fields.supplier_name,client:fields.buyer_name,amount:fields.amount})
-   await run(false,{seller:fields.supplier_name,client:fields.buyer_name,amount:fields.amount})
-  }catch(e){setParseError(e instanceof Error?e.message:'Invoice parse failed')}
-  finally{setParsing(false)}
+ const buildRequest=(market:MarketInput,providerList:Provider[])=>{
+  return {
+   opportunity_id:`OPP-${market.invoice.invoice_number||'CAPITAL-AGENTS'}`,
+   invoice:market.invoice,
+   requirements:market.requirements,
+   verification:market.verification,
+   risk:market.risk,
+   providers:providerList.map(p=>({...p,preferred_industries:p.preferred_industries??[]})),
+  }
  }
 
- const run=async(forceRefresh=false,companies?:{seller:string;client:string;amount:number})=>{
+ const run=async(forceRefresh=false,market?:MarketInput)=>{
   setError('');setPhase('loading');setRefresh(forceRefresh)
   try{
-   const request={...sampleRequest,providers:providers.length?providers.map(provider=>{
-    const fallback=sampleRequest.providers.find(item=>item.id===provider.id)||sampleRequest.providers[0]
-    return {...fallback,...provider}
-   }):sampleRequest.providers}
-   const body:any=request
-   if(companies||invoiceCtx){
-    const ctx=companies||invoiceCtx
-    body.companies={seller:ctx?.seller??null,client:ctx?.client??null,amount:ctx?.amount??null}
+   const marketData=market||marketInput
+   if(!marketData)throw new Error('No invoice data. Upload a PDF invoice to begin.')
+   let liveProviders=providers
+   if(!liveProviders.length){
+    const res=await fetch(`${apiBase}/api/providers`)
+    if(!res.ok)throw new Error('Provider state unavailable from the marketplace.')
+    liveProviders=await res.json() as Provider[]
    }
+   if(!liveProviders.length)throw new Error('No capital providers available in the marketplace.')
+   const body:any=buildRequest(marketData,liveProviders)
+   body.companies={seller:marketData.invoice.supplier_name??null,client:marketData.invoice.buyer_name??null,amount:marketData.invoice.amount??null}
    const url=forceRefresh?`${base}/analysis?refresh=true`:`${base}/analysis`
    const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
    const responseBody=await response.json().catch(()=>null)
@@ -103,7 +94,47 @@ export default function CapitalAgents({providers,error:providerError}:{providers
   }catch(e){setError(e instanceof Error?e.message:'Capital agents failed');setPhase('error')}
  }
 
- useEffect(()=>{if(!payload&&phase==='idle')void run()},[payload,phase])
+ const parseAndRun=async(parsedFile:File)=>{
+  setParsing(true);setParseError('')
+  try{
+   const formData=new FormData()
+   formData.append('file',parsedFile)
+   const res=await fetch(`${apiBase}/api/invoices/parse-pdf`,{method:'POST',body:formData})
+   const parseBody=await res.json().catch(()=>null)
+   if(!res.ok)throw new Error(parseBody&&typeof parseBody==='object'&&'detail' in parseBody?String(parseBody.detail):`Invoice parse failed: ${res.status}`)
+   if(!parseBody?.invoice||!parseBody?.evaluation)throw new Error('Invoice parsed but insufficient data for the capital agent.')
+   const market:MarketInput={
+    invoice:parseBody.invoice,
+    requirements:{minimum_amount:Math.round(parseBody.invoice.amount*0.8),max_settlement_hours:48,desired_tenor_days:60},
+    verification:parseBody.evaluation.verification,
+    risk:parseBody.evaluation.risk,
+   }
+   setMarketInput(market)
+   await run(false,market)
+  }catch(e){setParseError(e instanceof Error?e.message:'Invoice parse failed')}
+  finally{setParsing(false)}
+ }
+
+ // On first visit, load the latest real opportunity from the marketplace so
+ // the agent analyses real backend data — never a hardcoded scenario.
+ useEffect(()=>{
+  if(payload||phase!=='idle'||marketInput)return
+  const load=async()=>{
+   try{
+    const res=await fetch(`${apiBase}/api/opportunities`)
+    if(!res.ok)return
+    const items=await res.json()
+    const latest=(items||[]).find((item:any)=>item.invoice&&item.evaluation?.risk&&item.evaluation?.verification)
+    if(latest)setMarketInput({invoice:latest.invoice,requirements:latest.requirements,verification:latest.evaluation.verification,risk:latest.evaluation.risk})
+   }catch{/* stay waiting for an invoice */}
+  }
+  void load()
+ },[payload,phase,marketInput])
+
+ useEffect(()=>{
+  if(payload||phase!=='idle'||!marketInput)return
+  void run(false)
+ },[payload,phase,marketInput])
 
  const analyses=payload?.offers||[]
  const offers=analyses.filter(a=>a.offer.status==='OFFER')
@@ -114,18 +145,20 @@ export default function CapitalAgents({providers,error:providerError}:{providers
  const trace=payload?.trace||null
  const telemetry=research?.telemetry
  const cached=research?.status==='cached'
+ const invoice=marketInput?.invoice
+ const risk=marketInput?.risk
 
  return <main>
-  <header><div><p className="eyebrow">CAPITAL PROVIDERS • CAPITAL INTELLIGENCE</p><h1>Capital <em>agents.</em></h1><p className="lede">Autonomous provider agents that research the real capital market, score official provider intelligence, and price working capital under their own liquidity, risk and portfolio constraints.</p></div><div className="ca-actions"><button className="primary" onClick={()=>void run(false)} disabled={phase==='loading'}>{phase==='loading'?<Activity className="spin"/>:<Sparkles/>}{phase==='loading'?'Agent is analysing…':'Run agent analysis'}</button>{payload&&<button className="ca-refresh" onClick={()=>void run(true)} disabled={phase==='loading'}><RefreshCw/> Refresh research</button>}</div></header>
+  <header><div><p className="eyebrow">CAPITAL PROVIDERS • CAPITAL INTELLIGENCE</p><h1>Capital <em>agents.</em></h1><p className="lede">Autonomous provider agents that research the real capital market, score official provider intelligence, and price working capital under their own liquidity, risk and portfolio constraints.</p></div><div className="ca-actions"><button className="primary" onClick={()=>void run(false)} disabled={phase==='loading'||!marketInput}>{phase==='loading'?<Activity className="spin"/>:<Sparkles/>}{phase==='loading'?'Agent is analysing…':'Run agent analysis'}</button>{payload&&<button className="ca-refresh" onClick={()=>void run(true)} disabled={phase==='loading'}><RefreshCw/> Refresh research</button>}</div></header>
   {(error||providerError)&&<div className="error-banner" role="alert"><strong>Agent request failed.</strong> {error||providerError} <button onClick={()=>void run(false)} disabled={phase==='loading'}>Retry</button></div>}
 
-  <section className="ca-panel ca-invoice-input"><div className="ca-panel-head"><div><ShieldCheck/> INVOICE INPUT</div><span className="ca-trace-time">Parse a PDF invoice to seed the agent with real seller/client data</span></div><div className="ca-invoice-row"><input type="file" accept=".pdf,application/pdf" onChange={e=>setFile(e.target.files?.[0]||null)}/><button className="ca-refresh" onClick={()=>file&&void parseAndRun(file)} disabled={!file||parsing||phase==='loading'}>{parsing?<Activity className="spin"/>:<Banknote/>}{parsing?'Parsing invoice…':'Parse & run agent'}</button></div>{parseError&&<div className="error-banner" role="alert"><strong>Invoice parse failed.</strong> {parseError}</div>}{invoiceCtx&&<div className="ca-invoice-summary"><div><small>SELLER</small><strong>{invoiceCtx.seller}</strong></div><div><small>CLIENT</small><strong>{invoiceCtx.client}</strong></div><div><small>INVOICE AMOUNT</small><strong>{money(invoiceCtx.amount)}</strong></div></div>}</section>
+  <section className="ca-panel ca-invoice-input"><div className="ca-panel-head"><div><ShieldCheck/> INVOICE INPUT</div><span className="ca-trace-time">{invoice?'Invoice data loaded from the marketplace':'Upload a PDF invoice to drive the agent'}</span></div><div className="ca-invoice-row"><input type="file" accept=".pdf,application/pdf" onChange={e=>setFile(e.target.files?.[0]||null)}/><button className="ca-refresh" onClick={()=>file&&void parseAndRun(file)} disabled={!file||parsing||phase==='loading'}>{parsing?<Activity className="spin"/>:<Banknote/>}{parsing?'Parsing invoice…':'Parse & run agent'}</button></div>{parseError&&<div className="error-banner" role="alert"><strong>Invoice parse failed.</strong> {parseError}</div>}{invoice&&<div className="ca-invoice-summary"><div><small>SELLER</small><strong>{invoice.supplier_name||'—'}</strong></div><div><small>CLIENT</small><strong>{invoice.buyer_name||'—'}</strong></div><div><small>INVOICE AMOUNT</small><strong>{money(invoice.amount)}</strong></div></div>}</section>
 
   <section className="provenance" aria-label="Agent provenance"><div><small>CAPITAL MARKET AGENT</small><span className={phase==='ready'?'service':phase==='error'?'unavailable':'fixture'}>● {phase==='ready'?'SERVICE':phase==='error'?'UNAVAILABLE':'PENDING'}</span></div><div><small>MARKET REGIME</small><span>{analyses[0]?analyses[0].market.regime:'—'}</span></div><div><small>RESEARCH</small><span>{telemetry?`${telemetry.searches} search • ${telemetry.pages_scraped} pages`:'—'}</span></div><p>{cached?'Using cached provider intelligence — no new web research this run.':telemetry?'Live Firecrawl research with real official sources.':'No agent analysis received yet.'}</p></section>
 
   {phase==='loading'?<section className="empty-market"><Activity className="spin"/><div><p className="eyebrow">CAPITAL AGENT ACTIVITY</p><h2>Running the capital intelligence pipeline.</h2><p>Invoice received → risk loaded → capital market searched → providers researched → terms extracted → providers scored → suitability evaluated → constraints checked → price calculated → offer generated.</p></div></section>:
   phase==='error'?<section className="empty-market"><ShieldCheck/><div><p className="eyebrow">AGENT UNAVAILABLE</p><h2>Could not reach the capital agent at {base}.</h2><p>Ensure the capital-market service is running on :8002, then retry. The tab renders live agent output only — no fabricated decisions.</p></div></section>:
-  phase==='ready'&&<>
+  phase==='ready'&&payload?<>
   <div className="ca-grid">
    <div className="ca-main">
     {research&&<section className="ca-panel"><div className="ca-panel-head"><div><Globe/> CAPITAL MARKET INTELLIGENCE</div><span className={`ca-pill ${research.status}`}>{research.status==='live'?'LIVE WEB RESEARCH':research.status==='cached'?'CACHED INTELLIGENCE':'RESEARCH UNAVAILABLE'}</span></div><div className="ca-research-meta"><span>Last research <b>{time(telemetry?.last_research_at)}</b></span><span>Providers researched <b>{telemetry?.providers_researched||0}</b></span><span>Cached <b>{telemetry?.cache_hits||0}</b></span><span>Firecrawl</span></div>{research.error&&<p className="factor-failure">× {research.error}</p>}</section>}
@@ -136,7 +169,7 @@ export default function CapitalAgents({providers,error:providerError}:{providers
 
     {companies&&<section className="ca-panel"><div className="ca-panel-head"><div><Globe/> COMPANY REFERENCE</div><span className="ca-trace-time">Public company information for the invoice parties</span></div><div className="ca-intel-grid"><CompanyPanel title="SELLER INFORMATION" research={companies.seller}/><CompanyPanel title="CLIENT INFORMATION" research={companies.client}/></div></section>}
 
-    <section className="ca-panel"><div className="ca-panel-head"><div><Sparkles/> AGENT OFFER ARENA</div><span><i className="ca-dot"/> {analyses.length} providers • {offers.length} offers • {declines.length} declines</span></div><div className="provider-list">{analyses.map(a=><AgentCard key={a.provider.id} analysis={a} rateAdjustment={payload?.research?.rate_adjustment||0}/>)}</div></section>
+    <section className="ca-panel"><div className="ca-panel-head"><div><Sparkles/> AGENT OFFER ARENA</div><span><i className="ca-dot"/> {analyses.length} providers • {offers.length} offers • {declines.length} declines</span></div><div className="provider-list">{analyses.map(a=><AgentCard key={a.provider.id} analysis={a} rateAdjustment={payload?.research?.rate_adjustment||0} invoiceAmount={invoice?.amount||0} riskScore={risk?.score||0} riskBand={risk?.band||'—'}/>)}</div></section>
    </div>
 
    <aside className="ca-side">
@@ -144,7 +177,8 @@ export default function CapitalAgents({providers,error:providerError}:{providers
     <section className="ca-panel ca-decision"><div className="ca-panel-head"><div><Landmark/> CAPITAL AGENT DECISION</div></div><DecisionSection analyses={analyses} intelligences={intelligences}/></section>
    </aside>
   </div>
-  </>}
+  </>:
+  <section className="empty-market"><Banknote/><div><p className="eyebrow">WAITING FOR INVOICE DATA</p><h2>Upload an invoice PDF to start the agent.</h2><p>The Capital Agent analyses real marketplace data only — no demo scenarios. Upload a PDF invoice above, or run the flagship market from Market pulse to populate real opportunities.</p></div></section>}
  </main>
 }
 
@@ -187,7 +221,7 @@ function DecisionSection({analyses,intelligences}:{analyses:Analysis[];intellige
  </div>
 }
 
-function AgentCard({analysis,rateAdjustment}:{analysis:Analysis;rateAdjustment:number}){
+function AgentCard({analysis,rateAdjustment,invoiceAmount,riskScore,riskBand}:{analysis:Analysis;rateAdjustment:number;invoiceAmount:number;riskScore:number;riskBand:string}){
  const p=analysis.provider,o=analysis.offer,a=analysis.attractiveness,pr=analysis.pricing
  const declined=o.status==='DECLINE'
  return <article className={`provider ${declined?'ineligible':''}`}>
@@ -195,7 +229,7 @@ function AgentCard({analysis,rateAdjustment}:{analysis:Analysis;rateAdjustment:n
   <div className="offer-stats"><div><small>RATE</small><strong>{pr?`${pr.final_rate}%`:'—'}</strong></div><div><small>ADVANCE</small><strong>{o.financed_amount?money(o.financed_amount):'DECLINED'}</strong></div><div><small>SETTLE</small><strong>{o.settlement_hours?`${o.settlement_hours}h`:'—'}</strong></div></div>
   {declined?<p className="fail">× {o.reasons.join(' • ')}</p>:<p className="pass">✓ Finances {money(o.financed_amount)} at {pr?.final_rate}% for {o.tenor_days} days</p>}
   <details><summary>Decision trace — why this decision?</summary>
-   <div className="agent-block"><div className="eyebrow">OBSERVE</div><p className="ca-trace-line">Invoice ₹{sampleRequest.invoice.amount/100000}L • Risk {sampleRequest.risk.score}/100 ({sampleRequest.risk.band})</p></div>
+   <div className="agent-block"><div className="eyebrow">OBSERVE</div><p className="ca-trace-line">Invoice {money(invoiceAmount)} • Risk {riskScore}/100 ({riskBand})</p></div>
    {a&&<div className="agent-block"><div className="eyebrow">OPPORTUNITY ATTRACTIVENESS • {a.score}/100</div><div className="ledger-factors">{a.factors.map(f=><div key={f.label} className={`factor-card ${f.score>=50?'positive':'negative'}`}><div className="factor-title"><span>{f.label}</span><b>{f.score.toFixed(0)}</b></div><p className="factor-desc">{f.explanation}</p></div>)}</div></div>}
    {pr&&<div className="agent-block"><div className="eyebrow">PRICE</div><div className="pricing-lines">{pr.lines.map((line,i)=><div key={i} className={i===pr.lines.length-1?'pricing-final':'pricing-line'}><span>{line}</span>{i<pr.lines.length-1&&<small>{['base','risk','tenor','industry','liquidity','portfolio','market','research'][i]}</small>}</div>)}</div>{rateAdjustment!==0&&<p className="ca-trace-line">Researched provider intelligence shifted pricing by {rateAdjustment>0?'+':''}{rateAdjustment} points.</p>}</div>}
    {!declined&&<div className="agent-block"><div className="eyebrow">DECIDE</div><div className="term-grid"><span>Financed amount</span><b>{money(o.financed_amount)}</b><span>Advance rate</span><b>{pct(o.advance_rate)}</b><span>Fees</span><b>{money(o.fees)}</b><span>Total effective cost</span><b>{money(o.total_effective_cost)}</b><span>Expected annualised return</span><b>{o.expected_return}%</b><span>Post-allocation exposure</span><b>{o.post_allocation_exposure_ratio!==null?`${(o.post_allocation_exposure_ratio*100).toFixed(0)}% of capacity`:'—'}</b></div></div>}
