@@ -56,15 +56,22 @@ class PostgresStore:
 
     def save_opportunity(self, item: OpportunityRecord):
         with self.pool.connection() as db, db.transaction():
-            db.execute(
-                """insert into pratin.opportunities (id, created_at, status, payload)
+            result = db.execute(
+                """insert into pratin.opportunities as current (id, created_at, status, payload)
                    values (%s, %s, %s, %s::jsonb)
                    on conflict (id) do update set
                      created_at=excluded.created_at,
                      status=excluded.status,
-                     payload=excluded.payload""",
+                     payload=excluded.payload
+                   where current.status <> 'SETTLED'
+                      or excluded.status = 'SETTLED'""",
                 (item.id, item.created_at, item.status, _json(item)),
             )
+            if result.rowcount == 0:
+                raise ValueError("Settled opportunities cannot be overwritten by a stale market run")
+
+    def close(self):
+        self.pool.close()
 
     def get_opportunity(self, item_id: str) -> OpportunityRecord | None:
         with self.pool.connection() as db:

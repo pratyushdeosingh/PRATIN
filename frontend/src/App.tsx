@@ -2,11 +2,12 @@ import {useEffect,useMemo,useState} from 'react'
 import {ArrowRight,BadgeCheck,Bolt,Building2,CircleDollarSign,Gauge,Landmark,Radar,RotateCcw,ShieldCheck,Sparkles} from 'lucide-react'
 import {api,AuditEvent,IntegrationStatus,Metrics,Opportunity,Provider,RankedOffer,RiskLedgerEntry,Settlement} from './api'
 import CapitalAgents from './CapitalAgents'
+import {money} from './format'
 
-export const money=(n:number)=>new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(n)
+export {money} from './format'
 const lifecycle=['Invoice','Verify','Assess risk','Discover','Compete','Match','Finance','Settle','Reallocate']
 type Phase='idle'|'loading'|'ready'|'settling'|'settled'|'rerunning'|'completed'|'error'
-type View='pulse'|'capital-agents'|'risk-ledger'
+type View='pulse'|'opportunities'|'capital-agents'|'risk-ledger'
 type AllocationHistory={sequence:number;invoice:string;provider:string;rate:number|null;amount:number|null;liquidityBefore?:number;liquidityAfter?:number;exposureBefore?:number;exposureAfter?:number}
 type Receipt={settlement:Settlement;before:Provider;after:Provider}
 
@@ -16,6 +17,7 @@ const provenanceClass=(status?:IntegrationStatus)=>status==='SERVICE'?'service':
 export default function App(){
  const [view,setView]=useState<View>('pulse')
  const [ledgerEntries,setLedgerEntries]=useState<RiskLedgerEntry[]>([])
+ const [opportunities,setOpportunities]=useState<Opportunity[]>([])
  const [opportunity,setOpportunity]=useState<Opportunity|null>(null)
  const [metrics,setMetrics]=useState<Metrics|null>(null)
  const [providers,setProviders]=useState<Provider[]>([])
@@ -25,6 +27,9 @@ export default function App(){
  const [database,setDatabase]=useState<'sqlite'|'supabase-postgres'|null>(null)
  const [phase,setPhase]=useState<Phase>('idle')
  const [error,setError]=useState('')
+ const [ledgerError,setLedgerError]=useState('')
+ const [agentsError,setAgentsError]=useState('')
+ const [opportunitiesError,setOpportunitiesError]=useState('')
  const [failedAction,setFailedAction]=useState<'run'|'settle'|'reallocate'>('run')
  const offers=opportunity?.match?.ranked_offers||[]
  const winner=offers.find(x=>x.offer.id===opportunity?.match?.recommended_offer_id&&x.eligible)
@@ -33,12 +38,16 @@ export default function App(){
  const busy=phase==='loading'||phase==='settling'||phase==='rerunning'
  const activeStep={idle:0,loading:3,ready:6,settling:7,settled:8,rerunning:4,completed:9,error:0}[phase]
 
- const refreshLedger=async()=>{const entries=await api.riskLedger();setLedgerEntries(entries)}
- useEffect(()=>{if(view==='risk-ledger')void refreshLedger().catch(e=>setError(e instanceof Error?e.message:'Risk ledger failed'))},[view])
+ const refreshLedger=async()=>{const entries=await api.riskLedger();setLedgerEntries(entries);setLedgerError('')}
+ useEffect(()=>{
+  if(view==='risk-ledger')void refreshLedger().catch(e=>setLedgerError(e instanceof Error?e.message:'Risk ledger failed'))
+  if(view==='opportunities')void api.opportunities().then(items=>{setOpportunities(items);setOpportunitiesError('')}).catch(e=>setOpportunitiesError(e instanceof Error?e.message:'Opportunity history failed'))
+  if(view==='capital-agents')void api.providers().then(items=>{setProviders(items);setAgentsError('')}).catch(e=>setAgentsError(e instanceof Error?e.message:'Provider state failed'))
+ },[view])
  const refresh=async()=>{
   const [nextMetrics,nextProviders,nextAudit,health]=await Promise.all([api.metrics(),api.providers(),api.audit(),api.health()])
   setMetrics(nextMetrics);setProviders(nextProviders);setAudit(nextAudit);setDatabase(health.database)
-  void refreshLedger().catch(()=>undefined)
+  void refreshLedger().catch(e=>setLedgerError(e instanceof Error?e.message:'Risk ledger failed'))
   return nextProviders
  }
  const run=async()=>{
@@ -88,8 +97,8 @@ export default function App(){
  const risk=opportunity?.evaluation?.risk
  const verification=opportunity?.evaluation?.verification
 
- return <div className="shell"><aside className="rail"><div className="brand"><span>P</span><div>PRATIN<small>CAPITAL NETWORK</small></div></div><nav><button className={view==='pulse'?'active':''} onClick={()=>setView('pulse')}><Gauge/>Market pulse</button><button><Radar/>Opportunities</button><button className={view==='capital-agents'?'active':''} onClick={()=>setView('capital-agents')}><Landmark/>Capital agents</button><button className={view==='risk-ledger'?'active':''} onClick={()=>setView('risk-ledger')}><ShieldCheck/>Risk ledger</button></nav><div className="rail-foot"><span className="live-dot"/> MARKET READY<small>Synthetic demo • No real funds</small></div></aside>
- {view==='capital-agents'?<CapitalAgents/>:view==='risk-ledger'?<RiskLedger entries={ledgerEntries} error={error}/>:<main><header><div><p className="eyebrow">CONTINUOUS CLEARING • STATEFUL DEMO MARKET</p><h1>Capital, intelligently <em>allocated.</em></h1><p className="lede">Every verified invoice enters a competitive market where autonomous providers price risk, protect portfolios and race to satisfy the supplier.</p></div><button className="primary" onClick={primaryAction} disabled={busy}>{busy?<RotateCcw className="spin"/>:<Bolt/>}{primaryLabel}</button></header>
+ return <div className="shell"><aside className="rail"><div className="brand"><span>P</span><div>PRATIN<small>CAPITAL NETWORK</small></div></div><nav><button className={view==='pulse'?'active':''} onClick={()=>setView('pulse')}><Gauge/>Market pulse</button><button className={view==='opportunities'?'active':''} onClick={()=>setView('opportunities')}><Radar/>Opportunities</button><button className={view==='capital-agents'?'active':''} onClick={()=>setView('capital-agents')}><Landmark/>Capital agents</button><button className={view==='risk-ledger'?'active':''} onClick={()=>setView('risk-ledger')}><ShieldCheck/>Risk ledger</button></nav><div className="rail-foot"><span className="live-dot"/> MARKET READY<small>Synthetic demo • No real funds</small></div></aside>
+ {view==='opportunities'?<Opportunities items={opportunities} error={opportunitiesError}/>:view==='capital-agents'?<CapitalAgents providers={providers} error={agentsError}/>:view==='risk-ledger'?<RiskLedger entries={ledgerEntries} error={ledgerError}/>:<main><header><div><p className="eyebrow">REQUEST-DRIVEN CLEARING • STATEFUL DEMO MARKET</p><h1>Capital, intelligently <em>allocated.</em></h1><p className="lede">Every verified invoice enters a competitive market where autonomous providers price risk, protect portfolios and race to satisfy the supplier.</p></div><button className="primary" onClick={primaryAction} disabled={busy}>{busy?<RotateCcw className="spin"/>:<Bolt/>}{primaryLabel}</button></header>
  {error&&<div className="error-banner" role="alert"><strong>Request failed.</strong> {error} <button onClick={retryAction} disabled={busy}>Retry safely</button></div>}
  <section className="provenance" aria-label="Integration provenance"><div><small>INVOICE / RISK AGENT</small><span className={provenanceClass(opportunity?.integration_status.invoice_risk)}>● {provenanceLabel(opportunity?.integration_status.invoice_risk)}</span></div><div><small>CAPITAL MARKET AGENTS</small><span className={provenanceClass(opportunity?.integration_status.capital_market)}>● {provenanceLabel(opportunity?.integration_status.capital_market)}</span></div><div><small>MARKET STATE</small><span className={database==='supabase-postgres'?'service':database?'fixture':'unavailable'}>● {database==='supabase-postgres'?'SUPABASE POSTGRES':database==='sqlite'?'SQLITE OFFLINE':'UNAVAILABLE'}</span></div><p>{!opportunity?'No market response received yet.':Object.values(opportunity.integration_status).includes('DEGRADED_FIXTURE')?'A service was unavailable; deterministic fixtures are clearly shown.':Object.values(opportunity.integration_status).every(x=>x==='SERVICE')?'Both responses came through validated HTTP service contracts.':'Deterministic fixture mode is active; these are not external service responses.'}</p></section>
  <section className="ticker">{lifecycle.map((x,i)=><div key={x} className={i<activeStep?'done':i===activeStep?'now':''}><span>{i<activeStep?'✓':i+1}</span>{x}{i<lifecycle.length-1&&<ArrowRight/>}</div>)}</section>
@@ -107,6 +116,13 @@ export default function App(){
  {audit.length>0&&<section className="audit-timeline"><p className="eyebrow">RECENT BACKEND AUDIT EVENTS</p>{audit.slice(0,4).map(event=><div key={event.id}><span>{event.event_type.replaceAll('_',' ')}</span><p>{event.detail}</p><small>{event.id}</small></div>)}</section>}
  </main>}
  </div>
+}
+
+function Opportunities({items,error}:{items:Opportunity[];error:string}){
+ return <main><header><div><p className="eyebrow">DURABLE BACKEND HISTORY • SYNTHETIC DEMO</p><h1>Financing <em>opportunities.</em></h1><p className="lede">Invoices admitted to the market remain visible with their current lifecycle state and backend recommendation.</p></div></header>
+ {error&&<div className="error-banner" role="alert">Opportunities unavailable: {error}</div>}
+ <section className="opportunity-grid">{items.length===0?<div className="empty-ledger">No opportunities exist yet. Run the flagship market from Market pulse.</div>:items.map(item=>{const winner=item.match?.ranked_offers.find(r=>r.offer.id===item.match?.recommended_offer_id);return <article className="opportunity-card" key={item.id}><div><small>{item.status.replaceAll('_',' ')} • {item.id}</small><h3>{item.invoice.invoice_number}</h3><p>{item.invoice.supplier_name} → {item.invoice.buyer_name}</p></div><dl><div><dt>Invoice value</dt><dd>{money(item.invoice.amount)}</dd></div><div><dt>Minimum capital</dt><dd>{money(item.requirements.minimum_amount)}</dd></div><div><dt>Recommendation</dt><dd>{winner?.offer.provider_name||'Not cleared'}</dd></div><div><dt>Created</dt><dd>{new Date(item.created_at).toLocaleString()}</dd></div></dl></article>})}</section>
+ </main>
 }
 
 function RiskLedger({entries,error}:{entries:RiskLedgerEntry[];error:string}){

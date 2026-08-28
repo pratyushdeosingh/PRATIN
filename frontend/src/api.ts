@@ -6,9 +6,9 @@ export type RiskFactor={label:string;impact:'positive'|'negative'|'neutral';poin
 export type VerificationResult={status:string;confidence:number;verified_fields:string[];uncertain_fields:string[];reasons:string[];simulation_notice?:string}
 export type RiskAssessment={score:number;band:string;confidence:number;factors:RiskFactor[];missing_information:string[];policy_version:string}
 export type RiskLedgerEntry={id:string;opportunity_id:string|null;invoice_number:string;supplier_name:string;buyer_name:string;amount:number;evaluated_at:string;verification:VerificationResult;risk:RiskAssessment;provenance:'SERVICE'|'FIXTURE'}
-export type Opportunity={id:string;status:string;invoice:{invoice_number:string;supplier_name:string;buyer_name:string;amount:number};requirements:{minimum_amount:number;max_settlement_hours:number;desired_tenor_days:number};evaluation?:{verification:VerificationResult;risk:RiskAssessment;provenance:'SERVICE'|'FIXTURE'};match?:{recommended_offer_id:string|null;ranked_offers:RankedOffer[];recommendation_reasons:string[];policy_version:string};integration_status:Record<string,IntegrationStatus>}
+export type Opportunity={id:string;created_at:string;status:string;invoice:{invoice_number:string;supplier_name:string;buyer_name:string;amount:number};requirements:{minimum_amount:number;max_settlement_hours:number;desired_tenor_days:number};evaluation?:{verification:VerificationResult;risk:RiskAssessment;provenance:'SERVICE'|'FIXTURE'};match?:{recommended_offer_id:string|null;ranked_offers:RankedOffer[];recommendation_reasons:string[];policy_version:string};integration_status:Record<string,IntegrationStatus>}
 export type Metrics={available_liquidity:number;active_opportunities:number;offers_generated:number;financing_allocated:number;settlements:number;provider_participation_rate:number}
-export type Provider={id:string;name:string;available_liquidity:number;current_exposure:number}
+export type Provider={id:string;name:string;provider_type:string;available_liquidity:number;risk_appetite:number;min_return_rate:number;max_ticket_size:number;settlement_hours:number;current_exposure:number;portfolio_capacity:number}
 export type Settlement={id:string;opportunity_id:string;offer_id:string;provider_id:string;amount:number;status:string;settled_at:string;notice:string}
 export type AuditEvent={id:string;timestamp:string;event_type:string;opportunity_id:string|null;detail:string}
 export type Health={status:string;service:string;mode:string;database:'sqlite'|'supabase-postgres';version:string}
@@ -37,4 +37,5 @@ export const api={
  health:()=>request<Health>('/health'),
  riskLedger:()=>request<RiskLedgerEntry[]>('/api/risk-ledger'),
  riskLedgerEntry:(id:string)=>request<RiskLedgerEntry>(`/api/risk-ledger/${id}`),
+ opportunities:()=>request<Opportunity[]>('/api/opportunities'),
 }

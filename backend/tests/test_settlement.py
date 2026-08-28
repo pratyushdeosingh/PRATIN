@@ -119,3 +119,15 @@ def test_settlement_rolls_back_every_write_when_audit_fails(tmp_path, monkeypatc
     assert store.settlements() == []
     assert store.get_opportunity(item.id).status == "MARKET_RUN"
     assert store.audits() == []
+
+
+def test_stale_market_result_cannot_overwrite_settled_opportunity(tmp_path):
+    store = Store(str(tmp_path / "stale-market.db"))
+    item = ready_opportunity(store)
+    store.settle(item, item.match.recommended_offer_id)
+
+    with pytest.raises(ValueError, match="stale market run"):
+        store.save_opportunity(item)
+
+    assert store.get_opportunity(item.id).status == "SETTLED"
+    assert len(store.settlements()) == 1
