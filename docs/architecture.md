@@ -19,7 +19,7 @@ SQLite implements the same store contract only for deterministic offline demos a
 
 Provider participation gates verification, risk appetite, liquidity, ticket size and concentration. Matching then rejects offers that miss supplier capital, time or cost mandates. Remaining offers receive factor scores and weights from `backend/app/matching.py`. The response includes the full decomposition and a policy-version notice.
 
-The canonical `matching-policy-1.1-demo` weights are usable capital 28%, total effective cost 32%, settlement speed 16%, tenor 8%, provider risk-adjusted return 8% and remaining liquidity 8%.
+The default `matching-policy-1.2-smart-match` weights are usable capital 28%, total effective cost 32%, settlement speed 16%, tenor 8%, provider risk-adjusted return 8% and remaining liquidity 8%. The supplier can explicitly choose balanced, fastest, lowest-fee, or highest-advance priorities; hard eligibility gates remain unchanged and always run before ranking.
 
 ## Resilience and provenance
 
