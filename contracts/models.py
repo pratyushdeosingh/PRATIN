@@ -77,6 +77,7 @@ class VerificationResult(StrictModel):
     verified_fields: list[str]
     uncertain_fields: list[str]
     reasons: list[str]
+    reason_codes: list[str] = []
     simulation_notice: str = "Synthetic rule-based verification; not a banking, GST, KYC, or legal verification."
 
 
@@ -85,6 +86,7 @@ class RiskFactor(StrictModel):
     impact: Literal["positive", "negative", "neutral"]
     points: float
     explanation: str
+    reason_code: str | None = None
 
 
 class RiskAssessment(StrictModel):
@@ -94,6 +96,37 @@ class RiskAssessment(StrictModel):
     factors: list[RiskFactor]
     missing_information: list[str]
     policy_version: str = "risk-policy-1.0-demo"
+
+
+class ExtractionConfidence(str, Enum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+
+
+class ExtractedInvoiceFields(StrictModel):
+    invoice_number: str | None = None
+    supplier_name: str | None = None
+    buyer_name: str | None = None
+    amount: float | None = None
+    currency: Literal["INR"] = "INR"
+    issue_date: date | None = None
+    due_date: date | None = None
+    gstin: str | None = None
+    purchase_order_reference: str | None = None
+    payment_terms: str | None = None
+    missing_fields: list[str] = []
+    warnings: list[str] = []
+    extraction_confidence: ExtractionConfidence = ExtractionConfidence.LOW
+
+
+class InvoiceParseResponse(StrictModel):
+    status: Literal["SUCCESS", "PDF_TEXT_UNREADABLE", "PDF_EMPTY", "PDF_INVALID"]
+    extracted_fields: ExtractedInvoiceFields | None = None
+    invoice: Invoice | None = None
+    evaluation: InvoiceEvaluation | None = None
+    ledger_entry: RiskLedgerEntry | None = None
+    error_detail: str | None = None
 
 
 class InvoiceEvaluationRequest(StrictModel):
@@ -117,6 +150,8 @@ class RiskLedgerEntry(StrictModel):
     verification: VerificationResult
     risk: RiskAssessment
     provenance: Literal["SERVICE", "FIXTURE"] = "SERVICE"
+    source: str | None = None
+    source_filename: str | None = None
 
 
 class Provider(StrictModel):

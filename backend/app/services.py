@@ -49,3 +49,22 @@ class IntegrationClient:
             if self.settings.integration_mode == "required":
                 raise
             return generate_market(request).model_copy(update={"provenance": "FIXTURE"}), "DEGRADED_FIXTURE"
+
+    async def parse_invoice_pdf(self, pdf_bytes: bytes, filename: str):
+        from contracts.models import InvoiceParseResponse
+        if self.settings.integration_mode == "fixture":
+            from services.invoice_risk.pdf_parser import parse_and_evaluate_pdf
+            return parse_and_evaluate_pdf(pdf_bytes, filename=filename), "FIXTURE"
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.timeout, transport=self.transport) as client:
+                files = {"file": (filename, pdf_bytes, "application/pdf")}
+                response = await client.post(f"{self.settings.invoice_risk_url}/parse-invoice", files=files)
+                if response.status_code == 422:
+                    return InvoiceParseResponse.model_validate(response.json()), "SERVICE"
+                response.raise_for_status()
+                return InvoiceParseResponse.model_validate(response.json()), "SERVICE"
+        except (httpx.HTTPError, ValueError):
+            if self.settings.integration_mode == "required":
+                raise
+            from services.invoice_risk.pdf_parser import parse_and_evaluate_pdf
+            return parse_and_evaluate_pdf(pdf_bytes, filename=filename), "DEGRADED_FIXTURE"
