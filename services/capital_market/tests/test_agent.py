@@ -323,8 +323,9 @@ def test_pricing_decomposition_is_deterministic_and_explainable():
     assert a1.pricing.final_rate == round(
         a1.pricing.base_return_rate + a1.pricing.risk_premium + a1.pricing.tenor_adjustment
         + a1.pricing.industry_adjustment + a1.pricing.liquidity_adjustment
-        + a1.pricing.portfolio_adjustment + a1.pricing.market_adjustment, 2)
-    assert len(a1.pricing.lines()) == 8
+        + a1.pricing.portfolio_adjustment + a1.pricing.market_adjustment
+        + a1.pricing.research_adjustment, 2)
+    assert len(a1.pricing.lines()) == 9
 
 
 # --- Extra: expected return is positive and annualised --------------------------

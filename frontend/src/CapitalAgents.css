@@ -1,0 +1,103 @@
+/* Capital Agents page-local styles — scoped to the Capital Intelligence cockpit.
+   Kept out of the global stylesheet so other pages are untouched. */
+
+.ca-actions{display:flex;gap:10px;align-items:center}
+.ca-refresh{display:flex;align-items:center;gap:8px;border:1px solid #c9d5cb;background:#fff;color:#315f50;border-radius:4px;padding:14px 16px;font:800 11px Manrope;text-transform:uppercase;letter-spacing:.05em;cursor:pointer}
+.ca-refresh:disabled{opacity:.55;cursor:not-allowed}
+.ca-refresh svg{width:14px}
+
+.ca-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:14px;margin-top:22px}
+.ca-side{display:grid;gap:14px;align-content:start}
+
+.ca-panel{background:#f8faf6;border:1px solid #d2ddd4;padding:16px}
+.ca-panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding-bottom:10px;border-bottom:1px solid #e2e8e1;font:600 10px DM Mono;letter-spacing:.08em;color:#315f50}
+.ca-panel-head>div{display:flex;gap:8px;align-items:center}
+.ca-panel-head svg{width:14px;color:#43836e}
+.ca-trace-time{font:7px DM Mono;color:#93a19b;letter-spacing:.04em}
+
+.ca-pill{display:inline-block;font:700 8px DM Mono;padding:4px 8px;border-radius:3px;letter-spacing:.08em}
+.ca-pill.live{background:#dfff9b;color:#234329}
+.ca-pill.cached{background:#e4edf8;color:#315b82}
+.ca-pill.unavailable{background:#ffe2dc;color:#9a4438}
+.ca-pill.offer{background:#dfff9b;color:#234329;margin-bottom:8px}
+
+.ca-research-meta{display:flex;flex-wrap:wrap;gap:18px;margin-top:10px;font:9px DM Mono;color:#61736d}
+.ca-research-meta b{color:#193e33}
+
+/* Execution trace */
+.ca-trace{margin-top:12px;display:grid;gap:6px}
+.ca-trace-step{display:flex;align-items:center;gap:9px;font-size:11px;color:#4a5f57}
+.ca-trace-step small{font:8px DM Mono;color:#93a19b;margin-left:auto;max-width:55%;text-align:right}
+.ca-trace-step.done{color:#2e5c45}
+.ca-trace-step.failed{color:#a74e42}
+.ca-trace-step.skipped{color:#93a19b}
+.trace-mark{width:16px;height:16px;border:1px solid #cdd7d0;border-radius:50%;display:inline-grid;place-items:center;font:700 8px DM Mono;color:#8a9a94;flex:none}
+.trace-mark.done{background:#193e33;color:#c9ff5b;border-color:#193e33}
+.trace-mark.failed{background:#ffe2dc;color:#9a4438;border-color:#e7aa9f}
+.trace-mark.running{background:#c9ff5b;color:#10211c;border-color:#c9ff5b;animation:ca-pulse 1.2s infinite}
+.trace-mark.skipped{background:#eef2ee;color:#93a19b}
+@keyframes ca-pulse{50%{opacity:.4}}
+
+.ca-trace-line{font-size:10px;color:#61736d;margin:4px 0 0}
+
+/* Provider intelligence cards */
+.ca-intel-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+.ca-intel-card{background:#fff;border:1px solid #dbe3dc;padding:14px;display:grid;gap:10px}
+.ca-intel-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.ca-intel-head h3{font-size:14px;margin:0 0 3px}
+.ca-intel-head small{font:7px DM Mono;color:#80928c}
+.ca-score-ring{width:58px;height:58px;border:5px solid #c9ff5b;border-left-color:#315049;border-radius:50%;display:grid;place-content:center;text-align:center}
+.ca-score-ring strong{font-size:20px;line-height:1}
+.ca-score-ring small{font:6px DM Mono;color:#9fb0aa}
+
+.ca-score-dims{display:grid;gap:6px}
+.ca-score-dim{display:grid;grid-template-columns:1fr auto;gap:2px 8px;font-size:9px;position:relative;padding-bottom:7px}
+.ca-score-dim span{color:#557068}
+.ca-score-dim b{font-family:DM Mono;color:#193e33}
+.ca-score-dim i{position:absolute;left:0;bottom:0;height:3px;background:#94d142;border-radius:2px;grid-column:1/-1}
+.ca-score-dim i.unknown{background:#d8dfda;width:12%!important}
+
+.ca-evidence{margin-top:2px;border-top:1px dashed #dbe3dc;padding-top:8px}
+.ca-evidence summary{cursor:pointer;color:#315f50;font:700 9px Manrope}
+.ca-facts{margin-top:8px;display:grid;gap:6px}
+.ca-fact{background:#f5f8f3;border:1px solid #e2e8e1;padding:8px;display:grid;gap:3px}
+.ca-fact b{font:700 8px DM Mono;color:#315f50;text-transform:uppercase}
+.ca-fact span{font-size:9px;color:#4a5f57}
+.ca-fact small{font:8px DM Mono;color:#93a19b}
+.ca-fact small a{color:#315f50}
+.ca-fact.inference{background:#f2f6fb;border-color:#d8e3ee}
+.ca-fact.inference b{color:#315b82}
+.ca-none{font-size:9px;color:#93a19b;margin:6px 0 0}
+
+.ca-financing{margin-top:2px}
+.ca-fin-row{display:flex;justify-content:space-between;gap:12px;font-size:9px;padding:4px 0;border-bottom:1px solid #edf1ed}
+.ca-fin-row span{color:#7b8d86;text-transform:capitalize}
+.ca-fin-row b{font-family:DM Mono;color:#193e33;text-align:right;max-width:65%}
+.ca-fin-row b.unknown{color:#b55446}
+
+.ca-provenance-row{display:flex;justify-content:space-between;align-items:center;font:8px DM Mono;color:#93a19b}
+.ca-provenance-row a{display:flex;gap:5px;align-items:center;color:#315f50;text-decoration:none;font-weight:700}
+.ca-provenance-row svg{width:10px}
+
+/* Web research budget + decision side panels */
+.ca-budget-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0 0}
+.ca-budget-grid div{background:#fff;border:1px solid #dbe3dc;padding:9px}
+.ca-budget-grid dt{font:8px DM Mono;color:#799087;letter-spacing:.08em}
+.ca-budget-grid dd{font:600 16px DM Mono;color:#193e33;margin:4px 0 0}
+.ca-budget-note{font-size:9px;color:#61736d;margin:10px 0 0}
+
+.ca-decision-body{display:grid;gap:10px;margin-top:12px}
+.ca-decision-offer{background:#0d2922;color:#fff;padding:14px;border-radius:4px}
+.ca-decision-offer>strong{display:block;font-size:24px;letter-spacing:-.03em;margin:4px 0 6px}
+.ca-decision-terms{display:flex;gap:12px;font:8px DM Mono;color:#9ab1a9}
+.ca-decision-offer p{font-size:9px;color:#8fa79f;margin:8px 0 0}
+.ca-decision-offer p b{color:#c9ff5b;font-family:DM Mono}
+.ca-why{display:grid;gap:5px}
+.ca-why-row{display:flex;gap:7px;font-size:9px;color:#4a5f57;align-items:baseline}
+.ca-why-row span{color:#34705c;font-weight:700;flex:none}
+.ca-why-row p{margin:0;line-height:1.5}
+
+@media(max-width:1100px){
+ .ca-grid{grid-template-columns:1fr}
+ .ca-intel-grid{grid-template-columns:1fr}
+}

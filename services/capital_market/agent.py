@@ -46,7 +46,8 @@ class PricingDecomposition:
     liquidity_adjustment: float
     portfolio_adjustment: float
     market_adjustment: float
-    final_rate: float
+    research_adjustment: float = 0.0
+    final_rate: float = 0.0
 
     def lines(self) -> list[str]:
         """Human-readable decomposition lines, rounded to one basis point."""
@@ -60,6 +61,7 @@ class PricingDecomposition:
             f"Liquidity adjustment: {pct(self.liquidity_adjustment)}",
             f"Portfolio adjustment: {pct(self.portfolio_adjustment)}",
             f"Market adjustment: {pct(self.market_adjustment)}",
+            f"Research adjustment: {pct(self.research_adjustment)}",
             f"Final annual financing rate: {self.final_rate:.2f}%",
         ]
 
@@ -411,12 +413,15 @@ def constrain(ctx: dict) -> HardConstraintResult:
     return HardConstraintResult(passed=not failures, failures=failures)
 
 
-def price(ctx: dict, attractiveness: AttractivenessAssessment) -> tuple[PricingDecomposition, float, float, int, float, float, float]:
+def price(ctx: dict, attractiveness: AttractivenessAssessment,
+          research_adjustment: float = 0.0, advance_adjustment: float = 0.0) -> tuple[PricingDecomposition, float, float, int, float, float, float]:
     """PRICE: derive the full financing package.
 
     Returns (decomposition, advance_rate, financed_amount, tenor_days, fees,
     interest, total_effective_cost). Every adjustment is deterministic and
-    explainable.
+    explainable. ``research_adjustment``/``advance_adjustment`` are optional
+    signals from researched provider intelligence; they default to zero so
+    the deterministic engine stays fully backward compatible.
     """
     invoice = ctx["invoice"]
     requirements = ctx["requirements"]
@@ -430,6 +435,7 @@ def price(ctx: dict, attractiveness: AttractivenessAssessment) -> tuple[PricingD
     advance += 0.02 if industry_fit else -0.03
     advance -= risk_drag
     advance += market.advance_rate_adjustment
+    advance += advance_adjustment
     advance = round(max(0.50, min(0.95, advance)), 3)
 
     # --- Financing amount -------------------------------------------------
@@ -450,8 +456,9 @@ def price(ctx: dict, attractiveness: AttractivenessAssessment) -> tuple[PricingD
     liquidity_adj, _ = _liquidity_adjustment(provider, financed)
     portfolio_adj, _ = _portfolio_adjustment(provider, financed)
     market_adj = round(market.risk_premium_bps / 100.0, 2)
+    research_adj = round(research_adjustment, 2)
     base = provider.min_return_rate
-    final_rate = round(base + risk_premium + tenor_adj + industry_adj + liquidity_adj + portfolio_adj + market_adj, 2)
+    final_rate = round(base + risk_premium + tenor_adj + industry_adj + liquidity_adj + portfolio_adj + market_adj + research_adj, 2)
 
     decomposition = PricingDecomposition(
         base_return_rate=base,
@@ -461,6 +468,7 @@ def price(ctx: dict, attractiveness: AttractivenessAssessment) -> tuple[PricingD
         liquidity_adjustment=liquidity_adj,
         portfolio_adjustment=portfolio_adj,
         market_adjustment=market_adj,
+        research_adjustment=research_adj,
         final_rate=final_rate,
     )
 
@@ -583,8 +591,14 @@ def analyze_provider(
     request: MarketRequest,
     provider: Provider,
     market: MarketConditions | None = None,
+    research_adjustment: float = 0.0,
+    advance_adjustment: float = 0.0,
 ) -> ProviderAnalysis:
-    """Run the full agent pipeline for one provider against one opportunity."""
+    """Run the full agent pipeline for one provider against one opportunity.
+
+    Optional researched-intelligence signals adjust pricing; they default to
+    zero so the deterministic engine remains fully backward compatible.
+    """
     market = market or load_market()
     ctx = observe(request, provider, market)
     hard = constrain(ctx)
@@ -592,7 +606,8 @@ def analyze_provider(
         return ProviderAnalysis(provider=provider, market=market, hard=hard)
 
     attractiveness = evaluate_attractiveness(ctx)
-    (decomposition, advance, financed, tenor, fees, interest, total_cost) = price(ctx, attractiveness)
+    (decomposition, advance, financed, tenor, fees, interest, total_cost) = price(
+        ctx, attractiveness, research_adjustment, advance_adjustment)
 
     analysis = ProviderAnalysis(
         provider=provider,
