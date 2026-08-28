@@ -12,3 +12,5 @@ frontend/vite.config.js
 frontend/vite.config.d.ts
 tmp/
 .DS_Store
+
+.commandcode/
