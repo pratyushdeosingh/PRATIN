@@ -18,11 +18,12 @@
 
 **What changes after settlement?** Provider liquidity decreases, exposure rises, a settlement and audit event persist, and subsequent agent decisions consume the updated snapshot.
 
+**Where does durable state live?** The deployed backend uses a private Supabase Postgres schema. Opportunity and provider rows are locked during acceptance, and provider state, settlement, opportunity status and audit event commit atomically. SQLite is retained only for explicitly labelled offline demos and tests.
+
 **How is matching fair and auditable?** Hard gates run first. Versioned weights and per-factor values are returned. Stable inputs produce stable results. Production would add governed policy configuration, adverse-action review, fairness testing and immutable audit retention.
 
 **What is simulated?** Verification, risk inputs, providers, offers and settlement rails. The allocation logic, persistence, integration boundaries, constraint enforcement and state mutation are implemented.
 
 **How would banks integrate?** Adapters would map partner APIs/events into the shared contracts, with signed webhooks, mTLS/OAuth, idempotency keys, reconciliation, SLAs and human exception workflows.
 
-**How would it scale?** Move SQLite to PostgreSQL, extract durable workflow/event processing, partition by market/tenant, cache reference policy, add observability and use idempotent asynchronous provider fan-out.
-
+**How would it scale?** Supabase Postgres already replaces the demo-only SQLite store. Next steps are durable workflow/event processing, tenant partitioning, reference-policy caching, observability and idempotent asynchronous provider fan-out.

@@ -24,8 +24,7 @@ Shared rules: branch from `main`; read `README.md`, `docs/architecture.md`, `doc
 
 - Branch: `pratyush/orchestration-dashboard`
 - Owns: `backend/**`, `frontend/**`, Docker, CI, docs and final integration.
-- Definition of done: full API loop, hard gates, explainable deterministic ranking, idempotent settlement, SQLite state, visible provenance, polished demo, required-mode integration and all repository checks.
+- Definition of done: full API loop, hard gates, explainable deterministic ranking, idempotent settlement, private Supabase Postgres state with an explicit SQLite offline fallback, visible provenance, polished demo, required-mode integration and all repository checks.
 - Do not rewrite teammate service internals during integration; resolve contract differences with tests and review.
 
 **Codex prompt:** “On branch `pratyush/orchestration-dashboard`, read the four required files above. Own orchestration, HTTPX integration, matching, SQLite, settlement, audit, React cockpit, Docker, CI and demo QA. Keep business decisions in the backend and validate every service response. Demonstrate lowest-rate loss and a different second allocation after liquidity changes. Do not delete teammate work to resolve conflicts; reconcile contracts and run required-mode integration before the PR.”
-

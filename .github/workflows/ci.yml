@@ -18,3 +18,74 @@ jobs:
       - run: pnpm --dir frontend install --frozen-lockfile
       - run: pnpm --dir frontend test
       - run: pnpm --dir frontend run build
+      - run: docker compose config --quiet
+
+  required-mode-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SUPABASE_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Apply the Supabase-compatible private schema
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import psycopg
+
+          with psycopg.connect(os.environ["SUPABASE_DATABASE_URL"], autocommit=True) as connection:
+              connection.execute("create role anon; create role authenticated; create role service_role;")
+              connection.execute(
+                  Path("supabase/migrations/20260828091405_create_pratin_marketplace.sql").read_text(),
+                  prepare=False,
+              )
+          PY
+      - name: Prove required-mode service orchestration and reallocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup() {
+            kill "${CORE_PID:-}" "${RISK_PID:-}" "${MARKET_PID:-}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          python -m uvicorn services.invoice_risk.app:app --host 127.0.0.1 --port 8001 > invoice-risk.log 2>&1 &
+          RISK_PID=$!
+          python -m uvicorn services.capital_market.app:app --host 127.0.0.1 --port 8002 > capital-market.log 2>&1 &
+          MARKET_PID=$!
+          PRATIN_INTEGRATION_MODE=required PRATIN_DATABASE_BACKEND=supabase \
+            python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 > core.log 2>&1 &
+          CORE_PID=$!
+
+          for port in 8001 8002 8000; do
+            ready=false
+            for attempt in {1..30}; do
+              if curl --fail --silent "http://127.0.0.1:${port}/health" >/dev/null; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            if [ "$ready" != true ]; then
+              cat invoice-risk.log capital-market.log core.log
+              exit 1
+            fi
+          done
+
+          PRATIN_EXPECTED_DATABASE=supabase-postgres python -m backend.app.integration_check
