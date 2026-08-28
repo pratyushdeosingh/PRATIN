@@ -4,6 +4,9 @@ from typing import Literal
 
 IntegrationMode = Literal["required", "auto", "fixture"]
 
+def _flag(name: str, default: str = "true") -> bool:
+    return os.getenv(name, default).lower() in {"1", "true", "yes", "on"}
+
 @dataclass(frozen=True)
 class Settings:
     integration_mode: IntegrationMode = os.getenv("PRATIN_INTEGRATION_MODE", "auto")  # type: ignore[assignment]
@@ -16,6 +19,8 @@ class Settings:
     )  # type: ignore[assignment]
     database_url: str | None = os.getenv("SUPABASE_DATABASE_URL")
     timeout: float = float(os.getenv("SERVICE_TIMEOUT_SECONDS", "3"))
+    enable_digital_twin: bool = _flag("PRATIN_ENABLE_DIGITAL_TWIN")
+    enable_stress_lab: bool = _flag("PRATIN_ENABLE_STRESS_LAB")
 
     def __post_init__(self):
         if self.integration_mode not in {"required", "auto", "fixture"}:

@@ -121,7 +121,7 @@ python -m backend.app.integration_check
 docker compose config --quiet
 ```
 
-Current baseline: **80 passing Python tests**, **6 Postgres-only tests skipped unless `PRATIN_TEST_POSTGRES_URL` is configured**, and **8 passing frontend tests**. Coverage includes PDF validation/parsing, risk explanation, provider-agent constraints and pricing, matching, replay-safe settlement, rollback, stale-state protection, persistence selection, and the end-to-end two-allocation flow.
+Current baseline: **84 passing Python tests**, **6 Postgres-only tests skipped unless `PRATIN_TEST_POSTGRES_URL` is configured**, and **8 passing frontend tests**. Coverage includes PDF validation/parsing, risk explanation, provider-agent constraints and pricing, matching, replay-safe settlement, rollback, stale-state protection, persistence selection, the end-to-end two-allocation flow, and counterfactual simulations.
 
 ## Repository map
 
@@ -140,6 +140,30 @@ docs/                    Architecture, demo script, integration and judging note
 PRATIN is a demonstrator, not a production finance platform. Real deployment requires regulated data/settlement integrations, KYC/KYB and e-invoice validation, fraud controls, RBAC, encryption and key management, observability, model governance, privacy controls, and legal/compliance review.
 
 Named for Pratyush, Pratham, and Nitin. See the [team guide](docs/team-start-here.md), [architecture notes](docs/architecture.md), and [demo script](docs/demo-script.md).
+
+## Advanced capabilities
+
+| Capability | Status | Classification |
+|---|---|---|
+| Decision Influence Breakdown | Implemented | Existing canonical factor weights visualized as weighted contributions |
+| Why Not This Provider? | Implemented | Exact eligibility thresholds plus approximate ranking sensitivity |
+| Market Digital Twin | Implemented | Pure deterministic simulation; never persisted |
+| Supplier Strategy Lab | Implemented | Demo-only trade-off curve using canonical agents and matching |
+| Capital Network Stress Lab | Implemented | Six deterministic shocks and an explainable resilience heuristic |
+| Market Intelligence | Implemented | Derived only from current PRATIN marketplace state |
+| Confidence-aware risk stress | Implemented in simulation API | Optional uncertainty penalty; never changes the flagship recommendation |
+| Capital graph, replay snapshots, Judge Mode | Deferred | Requires dedicated UI/history work; no history is fabricated |
+| Negotiation, Command Center, Auto Demo, System Live | Deferred | Future isolated demo modules; current offers and settlement remain unchanged |
+
+### Simulation API
+
+- `POST /api/simulations/market-twin` clones a completed opportunity and current providers, applies validated overrides, runs the same capital-agent and matching functions, and returns baseline versus simulated results.
+- `GET /api/opportunities/{id}/counterfactual/{provider_id}` explains exact eligibility changes and approximate weighted ranking disadvantages.
+- `POST /api/simulations/strategy` compares supplier settlement deadlines and terms.
+- `POST /api/simulations/stress/{id}` runs liquidity, credit, timing, provider-failure, market-regime, and concentration shocks.
+- `GET /api/market/intelligence` returns transparent current-state market metrics.
+
+All simulation endpoints are side-effect free: they do not write opportunities, providers, settlements, or audit events. `PRATIN_ENABLE_DIGITAL_TWIN` and `PRATIN_ENABLE_STRESS_LAB` can disable the two primary simulation surfaces.
 
 ---
 

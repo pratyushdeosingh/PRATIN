@@ -40,6 +40,11 @@ export const api={
  riskLedger:()=>request<RiskLedgerEntry[]>('/api/risk-ledger'),
  riskLedgerEntry:(id:string)=>request<RiskLedgerEntry>(`/api/risk-ledger/${id}`),
  opportunities:()=>request<Opportunity[]>('/api/opportunities'),
+ marketTwin:(opportunity_id:string,overrides:Record<string,unknown>)=>request<any>('/api/simulations/market-twin',{method:'POST',body:JSON.stringify({opportunity_id,overrides})}),
+ counterfactual:(opportunityId:string,providerId:string)=>request<any>(`/api/opportunities/${opportunityId}/counterfactual/${providerId}`),
+ strategy:(body:Record<string,unknown>)=>request<any>('/api/simulations/strategy',{method:'POST',body:JSON.stringify(body)}),
+ stress:(opportunityId:string)=>request<any>(`/api/simulations/stress/${opportunityId}`,{method:'POST'}),
+ intelligence:()=>request<any>('/api/market/intelligence'),
  parseInvoicePdf:async(file:File):Promise<InvoiceParseResponse>=>{
   const formData=new FormData()
   formData.append('file',file)

@@ -268,5 +268,39 @@ class PlatformMetrics(StrictModel):
     provider_participation_rate: float
 
 
+class ProviderSimulationOverride(StrictModel):
+    available_liquidity: float | None = Field(default=None, ge=0)
+    current_exposure: float | None = Field(default=None, ge=0)
+    risk_appetite: float | None = Field(default=None, ge=0, le=100)
+    settlement_hours: int | None = Field(default=None, gt=0, le=720)
+    max_ticket_size: float | None = Field(default=None, gt=0)
+    max_concentration_ratio: float | None = Field(default=None, gt=0, le=1)
+
+
+class MarketTwinOverrides(StrictModel):
+    risk_score: float | None = Field(default=None, ge=0, le=100)
+    minimum_amount: float | None = Field(default=None, gt=0)
+    max_settlement_hours: int | None = Field(default=None, gt=0, le=720)
+    desired_tenor_days: int | None = Field(default=None, gt=0, le=365)
+    max_total_cost: float | None = Field(default=None, gt=0)
+    market_regime: Literal["FAVORABLE", "NEUTRAL", "CAUTIOUS", "STRESSED"] | None = None
+    provider_overrides: dict[str, ProviderSimulationOverride] = Field(default_factory=dict)
+    removed_provider_ids: list[str] = Field(default_factory=list)
+    confidence_stress: bool = False
+
+
+class MarketTwinRequest(StrictModel):
+    opportunity_id: str
+    overrides: MarketTwinOverrides = Field(default_factory=MarketTwinOverrides)
+
+
+class StrategySimulationRequest(StrictModel):
+    opportunity_id: str
+    minimum_amount: float | None = Field(default=None, gt=0)
+    max_settlement_hours: int | None = Field(default=None, gt=0, le=720)
+    desired_tenor_days: int | None = Field(default=None, gt=0, le=365)
+    max_total_cost: float | None = Field(default=None, gt=0)
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)

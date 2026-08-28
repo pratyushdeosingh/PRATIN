@@ -5,12 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from contracts.models import (AuditEvent, FinancingRequirements, InvoiceEvaluationRequest, InvoiceParseResponse,
-    MarketRequest, OpportunityCreate, OpportunityRecord, PlatformMetrics, Provider, RiskLedgerEntry, Settlement, utc_now)
+    MarketRequest, MarketTwinRequest, OpportunityCreate, OpportunityRecord, PlatformMetrics, Provider, RiskLedgerEntry,
+    Settlement, StrategySimulationRequest, utc_now)
 from .config import Settings
 from .fixtures import scenarios
 from .matching import rank_offers
 from .services import IntegrationClient
 from .store_factory import create_store
+from .simulation import counterfactual, intelligence, simulate, strategy, stress_lab
 
 settings = Settings(); store = create_store(settings); integrations = IntegrationClient(settings)
 
@@ -153,3 +155,33 @@ def metrics():
         active_opportunities=sum(i.status != "SETTLED" for i in opportunities), offers_generated=len(offers),
         financing_allocated=sum(s.amount for s in settlements), settlements=len(settlements),
         provider_participation_rate=round(participating / max(len(providers), 1), 2))
+
+def _simulation_opportunity(item_id: str) -> OpportunityRecord:
+    item = store.get_opportunity(item_id)
+    if not item: raise HTTPException(404, "Opportunity not found")
+    if not item.match or not item.evaluation: raise HTTPException(409, "Run the market before using simulations")
+    return item
+
+@app.post("/api/simulations/market-twin")
+def market_twin(request: MarketTwinRequest):
+    if not settings.enable_digital_twin: raise HTTPException(404, "Digital Twin is disabled")
+    try: return simulate(_simulation_opportunity(request.opportunity_id), store.providers(), request.overrides)
+    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
+
+@app.get("/api/opportunities/{item_id}/counterfactual/{provider_id}")
+def why_not_provider(item_id: str, provider_id: str):
+    try: return counterfactual(_simulation_opportunity(item_id), store.providers(), provider_id)
+    except LookupError as exc: raise HTTPException(404, str(exc)) from exc
+
+@app.post("/api/simulations/strategy")
+def supplier_strategy(request: StrategySimulationRequest):
+    try: return strategy(_simulation_opportunity(request.opportunity_id), store.providers(), request)
+    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
+
+@app.post("/api/simulations/stress/{item_id}")
+def run_stress_lab(item_id: str):
+    if not settings.enable_stress_lab: raise HTTPException(404, "Stress Lab is disabled")
+    return stress_lab(_simulation_opportunity(item_id), store.providers())
+
+@app.get("/api/market/intelligence")
+def market_intelligence(): return intelligence(store.providers(), store.opportunities())
