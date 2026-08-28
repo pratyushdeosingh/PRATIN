@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
-from contracts.models import AuditEvent, OpportunityRecord, Provider, Settlement, utc_now
+from contracts.models import AuditEvent, OpportunityRecord, Provider, RiskLedgerEntry, Settlement, utc_now
 from .fixtures import providers as fixture_providers
 
 class Store:
@@ -95,4 +95,31 @@ class Store:
     def audits(self) -> list[AuditEvent]:
         with self.connect() as db: rows = db.execute("SELECT payload FROM audit ORDER BY timestamp DESC").fetchall()
         return [AuditEvent.model_validate_json(row[0]) for row in rows]
+
+    def risk_ledger_entries(self) -> list[RiskLedgerEntry]:
+        opps = self.opportunities()
+        entries: list[RiskLedgerEntry] = []
+        for opp in opps:
+            if opp.evaluation:
+                entries.append(
+                    RiskLedgerEntry(
+                        id="RSK-" + opp.id.removeprefix("OPP-"),
+                        opportunity_id=opp.id,
+                        invoice_number=opp.invoice.invoice_number,
+                        supplier_name=opp.invoice.supplier_name,
+                        buyer_name=opp.invoice.buyer_name,
+                        amount=opp.invoice.amount,
+                        evaluated_at=opp.created_at,
+                        verification=opp.evaluation.verification,
+                        risk=opp.evaluation.risk,
+                        provenance=opp.evaluation.provenance,
+                    )
+                )
+        return entries
+
+    def risk_ledger_entry(self, identifier: str) -> RiskLedgerEntry | None:
+        for entry in self.risk_ledger_entries():
+            if entry.id == identifier or entry.opportunity_id == identifier:
+                return entry
+        return None
 

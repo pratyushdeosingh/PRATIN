@@ -1,14 +1,17 @@
 """Transparent demo verification and risk policy."""
 from datetime import date
 
+from uuid import uuid4
 from contracts.models import (
     Invoice,
     InvoiceEvaluation,
     RiskAssessment,
     RiskBand,
     RiskFactor,
+    RiskLedgerEntry,
     VerificationResult,
     VerificationStatus,
+    utc_now,
 )
 
 
@@ -68,4 +71,26 @@ def assess_risk(invoice: Invoice, verification: VerificationResult) -> RiskAsses
 def evaluate(invoice: Invoice) -> InvoiceEvaluation:
     verification = verify_invoice(invoice)
     return InvoiceEvaluation(verification=verification, risk=assess_risk(invoice, verification))
+
+
+def create_risk_ledger_entry(
+    invoice: Invoice,
+    opportunity_id: str | None = None,
+    evaluation: InvoiceEvaluation | None = None,
+    entry_id: str | None = None,
+) -> RiskLedgerEntry:
+    if evaluation is None:
+        evaluation = evaluate(invoice)
+    return RiskLedgerEntry(
+        id=entry_id or ("RSK-" + uuid4().hex[:10].upper()),
+        opportunity_id=opportunity_id,
+        invoice_number=invoice.invoice_number,
+        supplier_name=invoice.supplier_name,
+        buyer_name=invoice.buyer_name,
+        amount=invoice.amount,
+        evaluated_at=utc_now(),
+        verification=evaluation.verification,
+        risk=evaluation.risk,
+        provenance=evaluation.provenance,
+    )
 
