@@ -15,6 +15,8 @@ from services.invoice_risk.pdf_parser import parse_and_evaluate_pdf
 import fitz
 
 
+_SENTINEL = object()
+
 def create_base_invoice(
     invoice_number: str = "INV-2026-100",
     supplier_name: str = "Apex Precision Ltd",
@@ -22,18 +24,20 @@ def create_base_invoice(
     amount: float = 1_000_000.0,
     subtotal: float | None = None,
     tax_amount: float | None = None,
-    issue_date: date | None = None,
-    due_date: date | None = None,
+    issue_date: object = _SENTINEL,
+    due_date: object = _SENTINEL,
 ) -> Invoice:
     today = date.today()
+    resolved_issue = (today - timedelta(days=5)) if issue_date is _SENTINEL else issue_date
+    resolved_due = (today + timedelta(days=45)) if due_date is _SENTINEL else due_date
     return Invoice(
         invoice_number=invoice_number,
         supplier_name=supplier_name,
         buyer_name=buyer_name,
         amount=amount,
         currency="INR",
-        issue_date=issue_date or (today - timedelta(days=5)),
-        due_date=due_date or (today + timedelta(days=45)),
+        issue_date=resolved_issue,  # type: ignore
+        due_date=resolved_due,      # type: ignore
         industry="Manufacturing",
         gstin="27ABCDE1234F1Z5",
         purchase_order_reference="PO-2026-99",
@@ -192,16 +196,30 @@ def test_missing_subtotal_tax_retains_uncertainty_not_fabricated():
         tax_amount=None,
     )
     verif = verify_invoice(inv)
-    # Should not produce AMOUNT_MISMATCH
     assert "AMOUNT_MISMATCH" not in verif.reason_codes
     eval_res = evaluate(inv)
     assert not any(f.label == "Amount consistency mismatch" for f in eval_res.risk.factors)
 
 
-def test_non_positive_amount_rejected():
+def test_amount_consistency_rounding_tolerance():
+    # 1,000,000.40 + 180,000.20 = 1,180,000.60 vs declared 1,180,001.00 (diff 0.40 <= 1.0 tolerance)
+    inv = create_base_invoice(
+        amount=1_180_001.0,
+        subtotal=1_000_000.40,
+        tax_amount=180_000.20,
+    )
+    verif = verify_invoice(inv)
+    assert verif.status == VerificationStatus.VERIFIED
+    assert "AMOUNT_CONSISTENT" in verif.reason_codes
+    assert "AMOUNT_MISMATCH" not in verif.reason_codes
+
+
+def test_zero_amount_rejected():
     with pytest.raises(Exception):
         create_base_invoice(amount=0)
 
+
+def test_negative_amount_rejected():
     with pytest.raises(Exception):
         create_base_invoice(amount=-500)
 
@@ -213,6 +231,17 @@ def test_date_consistency_due_before_issue():
             issue_date=today,
             due_date=today - timedelta(days=5),
         )
+
+
+def test_missing_due_date_does_not_fail_date_sequence():
+    inv = create_base_invoice(
+        issue_date=date.today(),
+        due_date=None,
+    )
+    verif = verify_invoice(inv)
+    assert "due_date" in verif.uncertain_fields
+    assert "DUE_DATE_MISSING" in verif.reason_codes
+    assert "INVALID_DATE_SEQUENCE" not in verif.reason_codes
 
 
 # =========================================================================
