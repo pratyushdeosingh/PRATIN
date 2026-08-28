@@ -101,3 +101,17 @@
  .ca-grid{grid-template-columns:1fr}
  .ca-intel-grid{grid-template-columns:1fr}
 }
+
+/* Invoice input + company reference panels */
+.ca-invoice-input{margin-top:20px}
+.ca-invoice-row{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap}
+.ca-invoice-row input{font-size:11px}
+.ca-invoice-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:12px}
+.ca-invoice-summary div{background:#fff;border:1px solid #dbe3dc;padding:10px;display:grid;gap:3px}
+.ca-invoice-summary small{font:8px DM Mono;color:#799087;letter-spacing:.08em}
+.ca-invoice-summary strong{font-size:12px;color:#193e33}
+.ca-company-card{grid-template-columns:1fr}
+.ca-company-facts,.ca-company-signals,.ca-company-inferences{display:grid;gap:6px}
+.ca-company-signals,.ca-company-inferences{margin-top:8px;padding-top:8px;border-top:1px dashed #dbe3dc}
+.ca-fact.signal span{color:#6b4a2b}
+.ca-company-card .ca-pill{margin-left:auto}

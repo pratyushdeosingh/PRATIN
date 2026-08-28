@@ -22,6 +22,7 @@ SKIPPED = "skipped"
 _STEPS: list[str] = [
     "observe_invoice",
     "load_risk",
+    "research_companies",
     "search_market",
     "select_providers",
     "research_providers",
@@ -36,6 +37,7 @@ _STEPS: list[str] = [
 _LABELS: dict[str, str] = {
     "observe_invoice": "Invoice received",
     "load_risk": "Risk assessment loaded",
+    "research_companies": "Researching seller & client companies",
     "search_market": "Searching capital market",
     "select_providers": "Selecting relevant providers",
     "research_providers": "Researching official provider sources",

@@ -25,9 +25,13 @@ type ProviderScore={total:number;confidence:number;dimensions:ScoreDimension[]}
 type Intelligence={provider:ResearchedProvider;score:ProviderScore;suitability_score:number;suitable:boolean;suitability_reasons:string[];rate_adjustment:number;advance_adjustment:number;facts:Fact[];inferences:Fact[]}
 type TraceStep={key:string;label:string;state:'pending'|'running'|'done'|'failed'|'skipped';detail:string;at:string}
 type Trace={started_at:string;finished_at:string|null;error:string|null;steps:TraceStep[]}
-type Payload={offers:Analysis[];research:{research:Research;providers:Intelligence[];rate_adjustment:number;advance_adjustment:number}|null;trace:Trace|null}
+type CompanyFact={field:string;value:string;kind:'SOURCE_FACT'|'AGENT_INFERENCE';confidence:number;source_url:string;source_title:string;retrieved_at:string;evidence:string}
+type CompanyResearch={name:string;status:'live'|'cached'|'unavailable';source_url:string;source_title:string;retrieved_at:string;facts:CompanyFact[];inferences:CompanyFact[];error:string|null}
+type Companies={seller:CompanyResearch;client:CompanyResearch;telemetry:{searches:number;pages_scraped:number;cache_hits:number;cache_misses:number}}
+type Payload={offers:Analysis[];research:{research:Research;providers:Intelligence[];rate_adjustment:number;advance_adjustment:number}|null;companies:Companies|null;trace:Trace|null}
 
 const base=import.meta.env.VITE_CAPITAL_MARKET_URL||'http://127.0.0.1:8002'
+const apiBase=import.meta.env.VITE_API_BASE_URL||'http://127.0.0.1:8000'
 
 // Manual MarketRequest payload mirroring the backend demo fixtures (urgent scenario).
 const sampleRequest={
@@ -57,20 +61,45 @@ export default function CapitalAgents({providers,error:providerError}:{providers
  const [phase,setPhase]=useState<'idle'|'loading'|'ready'|'error'>('idle')
  const [error,setError]=useState('')
  const [refresh,setRefresh]=useState(false)
+ const [file,setFile]=useState<File|null>(null)
+ const [parsing,setParsing]=useState(false)
+ const [parseError,setParseError]=useState('')
+ const [invoiceCtx,setInvoiceCtx]=useState<{seller:string;client:string;amount:number}|null>(null)
 
- const run=async(forceRefresh=false)=>{
+ const parseAndRun=async(parsedFile:File)=>{
+  setParsing(true);setParseError('')
+  try{
+   const formData=new FormData()
+   formData.append('file',parsedFile)
+   const res=await fetch(`${apiBase}/api/invoices/parse-pdf`,{method:'POST',body:formData})
+   const parseBody=await res.json().catch(()=>null)
+   if(!res.ok)throw new Error(parseBody&&typeof parseBody==='object'&&'detail' in parseBody?String(parseBody.detail):`Invoice parse failed: ${res.status}`)
+   const fields=parseBody?.extracted_fields
+   if(!fields||!fields.supplier_name||!fields.buyer_name||!fields.amount)throw new Error('Invoice parsed but seller, client or amount is missing.')
+   setInvoiceCtx({seller:fields.supplier_name,client:fields.buyer_name,amount:fields.amount})
+   await run(false,{seller:fields.supplier_name,client:fields.buyer_name,amount:fields.amount})
+  }catch(e){setParseError(e instanceof Error?e.message:'Invoice parse failed')}
+  finally{setParsing(false)}
+ }
+
+ const run=async(forceRefresh=false,companies?:{seller:string;client:string;amount:number})=>{
   setError('');setPhase('loading');setRefresh(forceRefresh)
   try{
    const request={...sampleRequest,providers:providers.length?providers.map(provider=>{
     const fallback=sampleRequest.providers.find(item=>item.id===provider.id)||sampleRequest.providers[0]
     return {...fallback,...provider}
    }):sampleRequest.providers}
+   const body:any=request
+   if(companies||invoiceCtx){
+    const ctx=companies||invoiceCtx
+    body.companies={seller:ctx?.seller??null,client:ctx?.client??null,amount:ctx?.amount??null}
+   }
    const url=forceRefresh?`${base}/analysis?refresh=true`:`${base}/analysis`
-   const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)})
-   const body=await response.json().catch(()=>null)
-   if(!response.ok)throw new Error(body&&typeof body==='object'&&'detail' in body?String(body.detail):`Agent request failed: ${response.status}`)
-   if(!body||!Array.isArray(body.offers))throw new Error('Agent returned an unexpected payload')
-   setPayload(body);setPhase('ready')
+   const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+   const responseBody=await response.json().catch(()=>null)
+   if(!response.ok)throw new Error(responseBody&&typeof responseBody==='object'&&'detail' in responseBody?String(responseBody.detail):`Agent request failed: ${response.status}`)
+   if(!responseBody||!Array.isArray(responseBody.offers))throw new Error('Agent returned an unexpected payload')
+   setPayload(responseBody);setPhase('ready')
   }catch(e){setError(e instanceof Error?e.message:'Capital agents failed');setPhase('error')}
  }
 
@@ -81,6 +110,7 @@ export default function CapitalAgents({providers,error:providerError}:{providers
  const declines=analyses.filter(a=>a.offer.status==='DECLINE')
  const research=payload?.research?.research||null
  const intelligences=payload?.research?.providers||[]
+ const companies=payload?.companies||null
  const trace=payload?.trace||null
  const telemetry=research?.telemetry
  const cached=research?.status==='cached'
@@ -88,6 +118,8 @@ export default function CapitalAgents({providers,error:providerError}:{providers
  return <main>
   <header><div><p className="eyebrow">CAPITAL PROVIDERS • CAPITAL INTELLIGENCE</p><h1>Capital <em>agents.</em></h1><p className="lede">Autonomous provider agents that research the real capital market, score official provider intelligence, and price working capital under their own liquidity, risk and portfolio constraints.</p></div><div className="ca-actions"><button className="primary" onClick={()=>void run(false)} disabled={phase==='loading'}>{phase==='loading'?<Activity className="spin"/>:<Sparkles/>}{phase==='loading'?'Agent is analysing…':'Run agent analysis'}</button>{payload&&<button className="ca-refresh" onClick={()=>void run(true)} disabled={phase==='loading'}><RefreshCw/> Refresh research</button>}</div></header>
   {(error||providerError)&&<div className="error-banner" role="alert"><strong>Agent request failed.</strong> {error||providerError} <button onClick={()=>void run(false)} disabled={phase==='loading'}>Retry</button></div>}
+
+  <section className="ca-panel ca-invoice-input"><div className="ca-panel-head"><div><ShieldCheck/> INVOICE INPUT</div><span className="ca-trace-time">Parse a PDF invoice to seed the agent with real seller/client data</span></div><div className="ca-invoice-row"><input type="file" accept=".pdf,application/pdf" onChange={e=>setFile(e.target.files?.[0]||null)}/><button className="ca-refresh" onClick={()=>file&&void parseAndRun(file)} disabled={!file||parsing||phase==='loading'}>{parsing?<Activity className="spin"/>:<Banknote/>}{parsing?'Parsing invoice…':'Parse & run agent'}</button></div>{parseError&&<div className="error-banner" role="alert"><strong>Invoice parse failed.</strong> {parseError}</div>}{invoiceCtx&&<div className="ca-invoice-summary"><div><small>SELLER</small><strong>{invoiceCtx.seller}</strong></div><div><small>CLIENT</small><strong>{invoiceCtx.client}</strong></div><div><small>INVOICE AMOUNT</small><strong>{money(invoiceCtx.amount)}</strong></div></div>}</section>
 
   <section className="provenance" aria-label="Agent provenance"><div><small>CAPITAL MARKET AGENT</small><span className={phase==='ready'?'service':phase==='error'?'unavailable':'fixture'}>● {phase==='ready'?'SERVICE':phase==='error'?'UNAVAILABLE':'PENDING'}</span></div><div><small>MARKET REGIME</small><span>{analyses[0]?analyses[0].market.regime:'—'}</span></div><div><small>RESEARCH</small><span>{telemetry?`${telemetry.searches} search • ${telemetry.pages_scraped} pages`:'—'}</span></div><p>{cached?'Using cached provider intelligence — no new web research this run.':telemetry?'Live Firecrawl research with real official sources.':'No agent analysis received yet.'}</p></section>
 
@@ -102,6 +134,8 @@ export default function CapitalAgents({providers,error:providerError}:{providers
 
     {intelligences.length>0&&<section className="ca-panel"><div className="ca-panel-head"><div><Search/> PROVIDER INTELLIGENCE</div><span className="ca-trace-time">Official sources researched</span></div><div className="ca-intel-grid">{intelligences.map(intel=><ProviderIntelligenceCard key={intel.provider.source_url} intel={intel}/>)}</div></section>}
 
+    {companies&&<section className="ca-panel"><div className="ca-panel-head"><div><Globe/> COMPANY REFERENCE</div><span className="ca-trace-time">Public company information for the invoice parties</span></div><div className="ca-intel-grid"><CompanyPanel title="SELLER INFORMATION" research={companies.seller}/><CompanyPanel title="CLIENT INFORMATION" research={companies.client}/></div></section>}
+
     <section className="ca-panel"><div className="ca-panel-head"><div><Sparkles/> AGENT OFFER ARENA</div><span><i className="ca-dot"/> {analyses.length} providers • {offers.length} offers • {declines.length} declines</span></div><div className="provider-list">{analyses.map(a=><AgentCard key={a.provider.id} analysis={a} rateAdjustment={payload?.research?.rate_adjustment||0}/>)}</div></section>
    </div>
 
@@ -112,6 +146,22 @@ export default function CapitalAgents({providers,error:providerError}:{providers
   </div>
   </>}
  </main>
+}
+
+function CompanyPanel({title,research}:{title:string;research:CompanyResearch}){
+ const sourceFacts=research.facts.filter(f=>f.confidence>0&&f.field!=='signal')
+ const signalFacts=research.facts.filter(f=>f.field==='signal'&&f.confidence>0)
+ return <article className="ca-intel-card ca-company-card">
+  <div className="ca-intel-head"><div><h3>{research.name||'—'}</h3><small>{title}</small></div>{research.status!=='unavailable'?<span className={`ca-pill ${research.status}`}>{research.status==='live'?'LIVE WEB DATA':research.status==='cached'?'CACHED':'—'}</span>:<span className="ca-pill unavailable">UNAVAILABLE</span>}</div>
+  {research.error&&<p className="factor-failure">× {research.error}</p>}
+  <div className="ca-company-facts">
+   {sourceFacts.map(f=><div key={f.field} className="ca-fact"><b>{f.field}</b><span>{f.value.length>200?f.value.slice(0,200)+'…':f.value}</span><small>{f.source_title||'Source'} • {Math.round(f.confidence*100)}% confidence</small></div>)}
+   {sourceFacts.length===0&&<p className="ca-none">No public company details found for this party.</p>}
+  </div>
+  {signalFacts.length>0&&<div className="ca-company-signals"><p className="eyebrow">FINANCIAL / RISK SIGNALS</p>{signalFacts.map((f,i)=><div key={i} className="ca-fact signal"><span>{f.value.length>200?f.value.slice(0,200)+'…':f.value}</span><small>{f.source_title||'Source'}</small></div>)}</div>}
+  {research.inferences.length>0&&<div className="ca-company-inferences"><p className="eyebrow">AGENT INFERENCES</p>{research.inferences.map((f,i)=><div key={i} className="ca-fact inference"><span>{f.value}</span><small>Derived by the agent from source facts</small></div>)}</div>}
+  <div className="ca-provenance-row"><small>{time(research.retrieved_at)}</small>{research.source_url?<a href={research.source_url} target="_blank" rel="noreferrer">View Source <ExternalLink/></a>:null}</div>
+ </article>
 }
 
 function ProviderIntelligenceCard({intel}:{intel:Intelligence}){

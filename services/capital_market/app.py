@@ -58,15 +58,32 @@ class AgentAnalysisResponse(BaseModel):
     """
     offers: list[dict]
     research: dict | None = None
+    companies: dict | None = None
     trace: dict | None = None
 
 
+class CompanyInput(BaseModel):
+    """Optional invoice-party context for company information enrichment."""
+
+    seller: str | None = None
+    client: str | None = None
+    amount: float | None = None
+
+
+class AnalysisBody(MarketRequest):
+    """MarketRequest plus optional company enrichment inputs."""
+
+    companies: CompanyInput | None = None
+
+
 @app.post("/analysis", response_model=AgentAnalysisResponse)
-def analysis(request: MarketRequest, refresh: bool = Query(False)) -> AgentAnalysisResponse:
+def analysis(request: AnalysisBody, refresh: bool = Query(False)) -> AgentAnalysisResponse:
     """Full agent stack per provider with live researched intelligence.
 
     The research pass runs exactly once per opportunity context (cached
-    afterwards). ``refresh=true`` forces a fresh Firecrawl pass.
+    afterwards). ``refresh=true`` forces a fresh Firecrawl pass. When
+    ``companies`` is supplied, the seller and client names are researched
+    for public company information (separate, additive enrichment).
     """
     trace = ExecutionTrace()
     trace.start("observe_invoice")
@@ -75,6 +92,22 @@ def analysis(request: MarketRequest, refresh: bool = Query(False)) -> AgentAnaly
 
     trace.start("load_risk")
     trace.done("load_risk", f"Risk {request.risk.score}/100 ({request.risk.band.value})")
+
+    companies = None
+    if request.companies and (request.companies.seller or request.companies.client):
+        from .company_research import research_companies
+        trace.start("research_companies")
+        companies = research_companies(
+            request.companies.seller,
+            request.companies.client,
+            refresh=refresh,
+        )
+        company_telemetry = companies.get("telemetry", {})
+        trace.done("research_companies",
+                   f"{company_telemetry.get('searches', 0)} search(es), "
+                   f"{company_telemetry.get('cache_hits', 0)} cache hit(s)")
+    else:
+        trace.skip("research_companies", "No seller/client names supplied")
 
     try:
         trace.start("search_market")
@@ -130,6 +163,7 @@ def analysis(request: MarketRequest, refresh: bool = Query(False)) -> AgentAnaly
     return AgentAnalysisResponse(
         offers=[_serialize(a) for a in analyses],
         research=report.to_dict() if report else None,
+        companies=companies,
         trace=trace.to_dict(),
     )
 

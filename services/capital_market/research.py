@@ -174,8 +174,11 @@ class FirecrawlClient:
             raise ResearchError(f"firecrawl search unavailable: {exc}") from exc
         if proc.returncode != 0:
             raise ResearchError(f"firecrawl search failed: {proc.stderr.strip()[:200]}")
+        stdout = (proc.stdout or "").strip()
+        if "no results found" in stdout.lower():
+            return []
         try:
-            payload = json.loads(proc.stdout)
+            payload = json.loads(stdout)
         except ValueError as exc:
             raise ResearchError("firecrawl search returned invalid JSON") from exc
         if not payload.get("success"):
