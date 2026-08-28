@@ -355,17 +355,23 @@ def _portfolio_adjustment(provider: Provider, financed: float) -> tuple[float, s
 
 
 def constrain(ctx: dict) -> HardConstraintResult:
-    """CONSTRAIN: enforce hard provider gates.
+    """CONSTRAIN: enforce the provider's own hard gates.
 
-    A provider must decline when any mandatory condition fails. Failures are
-    recorded verbatim so the final decline is fully explainable.
+    A provider declines only when ITS OWN state cannot support the
+    opportunity: rejected verification, risk beyond its appetite,
+    insufficient liquidity to fund the ticket it can deploy, or a breached
+    portfolio concentration ceiling.
+
+    Supplier-side mandates (financing floor, settlement ceiling, total-cost
+    ceiling) belong to the marketplace matching layer, which rejects offers
+    against them. The agent prices honestly and flags those mismatches on
+    the offer instead of turning them into declines here, so the canonical
+    "lowest rate loses" story stays intact.
     """
-    invoice = ctx["invoice"]
-    requirements = ctx["requirements"]
     verification = ctx["verification"]
     risk = ctx["risk"]
     provider = ctx["provider"]
-    market = ctx["market"]
+    requirements = ctx["requirements"]
 
     failures: list[str] = []
 
@@ -380,21 +386,15 @@ def constrain(ctx: dict) -> HardConstraintResult:
             f"{provider.risk_appetite:.0f}."
         )
 
-    # 3. Available liquidity vs the required ticket
-    if provider.available_liquidity < requirements.minimum_amount:
+    # 3. Available liquidity vs the ticket the provider can deploy
+    required_ticket = min(requirements.minimum_amount, provider.max_ticket_size)
+    if provider.available_liquidity < required_ticket:
         failures.append(
-            f"Available liquidity ₹{provider.available_liquidity:,.0f} is below the "
-            f"required financing of ₹{requirements.minimum_amount:,.0f}."
+            f"Available liquidity ₹{provider.available_liquidity:,.0f} cannot fund the "
+            f"₹{required_ticket:,.0f} ticket within the provider's ticket size."
         )
 
-    # 4. Maximum ticket size vs the required ticket
-    if provider.max_ticket_size < requirements.minimum_amount:
-        failures.append(
-            f"Maximum ticket size ₹{provider.max_ticket_size:,.0f} is below the "
-            f"required financing of ₹{requirements.minimum_amount:,.0f}."
-        )
-
-    # 5. Portfolio concentration (including the prospective allocation)
+    # 4. Portfolio concentration (current and prospective)
     exposure_ratio = provider.current_exposure / provider.portfolio_capacity
     if exposure_ratio >= provider.max_concentration_ratio:
         failures.append(
@@ -407,27 +407,6 @@ def constrain(ctx: dict) -> HardConstraintResult:
             f"Allocating ₹{requirements.minimum_amount:,.0f} would push exposure above "
             f"the {provider.max_concentration_ratio:.0%} concentration ceiling."
         )
-
-    # 6. Settlement requirement
-    if provider.settlement_hours > requirements.max_settlement_hours:
-        failures.append(
-            f"Settlement in {provider.settlement_hours}h exceeds the required "
-            f"{requirements.max_settlement_hours}h limit."
-        )
-
-    # 7. Financing minimum is implied by requirements.minimum_amount (checked above)
-    # 8. Maximum total cost, when the supplier supplies a ceiling
-    if requirements.max_total_cost is not None:
-        # Compute a provisional cost so we can enforce the ceiling before offering.
-        financing = min(invoice.amount, provider.max_ticket_size, provider.available_liquidity)
-        fees = financing * provider.fee_rate
-        interest = financing * (provider.min_return_rate / 100.0) * requirements.desired_tenor_days / 365.0
-        provisional_cost = round(fees + interest, 2)
-        if provisional_cost > requirements.max_total_cost:
-            failures.append(
-                f"Total effective cost ₹{provisional_cost:,.0f} exceeds the supplier "
-                f"ceiling of ₹{requirements.max_total_cost:,.0f}."
-            )
 
     return HardConstraintResult(passed=not failures, failures=failures)
 
@@ -515,6 +494,10 @@ def _explain_offer(ctx: dict, analysis: ProviderAnalysis) -> None:
     reasons.append(
         f"Requested financing of ₹{requirements.minimum_amount:,.0f} fits within the "
         f"maximum ticket of ₹{provider.max_ticket_size:,.0f}."
+        if requirements.minimum_amount <= provider.max_ticket_size
+        else f"Provider maximum ticket of ₹{provider.max_ticket_size:,.0f} is below the "
+             f"requested ₹{requirements.minimum_amount:,.0f}; the offer is submitted "
+             f"for the marketplace to judge against the financing floor."
     )
     reasons.append(
         f"Current liquidity of ₹{provider.available_liquidity:,.0f} supports the allocation "

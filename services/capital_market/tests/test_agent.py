@@ -176,12 +176,20 @@ def test_provider_liquidity_affects_allocation():
 # --- 11. Maximum total cost is respected when supplied --------------------------
 
 def test_max_total_cost_ceiling_blocks_offer():
+    from backend.app.matching import rank_offers
     fintech = providers()[2]  # high fee_rate 4% -> expensive
     requirements = scenarios()["urgent"].requirements.model_copy(update={"max_total_cost": 15_000})
     request = make_request(provider_list=[fintech], requirements=requirements)
     offer = generate_market(request).offers[0]
-    assert offer.status == "DECLINE"
-    assert any("cost" in r.lower() for r in offer.reasons)
+    # The provider prices honestly and submits the offer...
+    assert offer.status == "OFFER"
+    assert offer.annual_rate is not None
+    # ...and the marketplace matching layer rejects it on the cost ceiling.
+    decision = rank_offers(request.opportunity_id, requirements, request.risk,
+                           [offer], {fintech.id: fintech.available_liquidity})
+    ranked = next(r for r in decision.ranked_offers if r.offer.id == offer.id)
+    assert ranked.eligible is False
+    assert any("cost" in failure.lower() for failure in ranked.hard_constraint_failures)
 
 
 def test_total_effective_cost_never_exceeds_supplied_ceiling():
@@ -236,15 +244,34 @@ def test_existing_deterministic_behaviour_does_not_regress():
     assert first == second
 
 
-# --- Extra: decline reasons name the hard constraint ----------------------------
+# --- Extra: supplier-side mandates are enforced by the matching layer -----------
 
 def test_decline_reasons_name_the_hard_constraint():
-    bank = providers()[0]  # ticket 700k < 800k min, settle 96h > 48h
+    # Provider-side constraint (risk above appetite) must be named.
+    bank = providers()[0].model_copy(update={"risk_appetite": 10})
     request = make_request(provider_list=[bank])
     offer = generate_market(request).offers[0]
     assert offer.status == "DECLINE"
-    assert any("Maximum ticket" in r for r in offer.reasons)
-    assert any("Settlement in" in r for r in offer.reasons)
+    assert any("appetite" in r for r in offer.reasons)
+
+
+def test_astra_prices_honestly_and_matching_rejects_supplier_mandates():
+    # Astra's own state is healthy; it submits a priced offer. The supplier
+    # mandates (financing floor, settlement ceiling) are matching-layer gates.
+    from backend.app.matching import rank_offers
+    bank = providers()[0]  # ticket 700k < 800k min, settle 96h > 48h
+    request = make_request(provider_list=[bank])
+    offer = generate_market(request).offers[0]
+    assert offer.status == "OFFER"
+    assert offer.annual_rate is not None and offer.financed_amount is not None
+    assert offer.financed_amount <= bank.max_ticket_size
+    decision = rank_offers(request.opportunity_id, request.requirements, request.risk,
+                           [offer], {bank.id: bank.available_liquidity})
+    ranked = next(r for r in decision.ranked_offers if r.offer.id == offer.id)
+    assert ranked.eligible is False
+    assert len(ranked.hard_constraint_failures) >= 2
+    assert any("below required" in f for f in ranked.hard_constraint_failures)
+    assert any("beyond" in f for f in ranked.hard_constraint_failures)
 
 
 # --- Extra: verification rejection blocks everyone ------------------------------
@@ -259,14 +286,20 @@ def test_verification_rejection_blocks_everyone():
     assert all(any("verification" in r.lower() for r in o.reasons) for o in offers)
 
 
-# --- Extra: partial financing below minimum declines ----------------------------
+# --- Extra: partial financing below minimum is rejected by matching --------------
 
-def test_partial_financing_below_minimum_declines():
+def test_partial_financing_below_minimum_rejected_by_matching():
+    from backend.app.matching import rank_offers
     fund = providers()[3].model_copy(update={"max_ticket_size": 500_000})
     request = make_request(provider_list=[fund])
     offer = generate_market(request).offers[0]
-    assert offer.status == "DECLINE"
-    assert any("ticket" in r for r in offer.reasons)
+    assert offer.status == "OFFER"
+    assert offer.financed_amount <= 500_000
+    decision = rank_offers(request.opportunity_id, request.requirements, request.risk,
+                           [offer], {fund.id: fund.available_liquidity})
+    ranked = next(r for r in decision.ranked_offers if r.offer.id == offer.id)
+    assert ranked.eligible is False
+    assert any("below required" in f for f in ranked.hard_constraint_failures)
 
 
 # --- Extra: attractiveness is explainable ---------------------------------------
