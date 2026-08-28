@@ -1,0 +1,86 @@
+from uuid import uuid4
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from contracts.models import (InvoiceEvaluationRequest, MarketRequest, OpportunityCreate, OpportunityRecord,
+    PlatformMetrics, Settlement, utc_now)
+from .config import Settings
+from .fixtures import scenarios
+from .matching import rank_offers
+from .services import IntegrationClient
+from .storage import Store
+
+settings = Settings(); store = Store(settings.db_path); integrations = IntegrationClient(settings)
+app = FastAPI(title="PRATIN Capital Allocation Engine", version="1.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+                   allow_methods=["*"], allow_headers=["*"])
+
+@app.get("/health")
+def health(): return {"status": "ok", "service": "pratin-core", "mode": settings.integration_mode, "version": "1.0.0"}
+
+@app.get("/api/scenarios")
+def demo_scenarios(): return {key: value.model_dump(mode="json") for key, value in scenarios().items()}
+
+@app.post("/api/demo/reset")
+def reset(): store.reset(); return {"status": "reset", "notice": "Synthetic marketplace state restored."}
+
+@app.post("/api/opportunities", response_model=OpportunityRecord)
+def create_opportunity(request: OpportunityCreate):
+    item = OpportunityRecord(id="OPP-" + uuid4().hex[:10].upper(), created_at=utc_now(), status="CREATED",
+        invoice=request.invoice, requirements=request.requirements)
+    store.save_opportunity(item); store.audit("OPPORTUNITY_CREATED", f"Invoice {request.invoice.invoice_number} entered the market.", item.id)
+    return item
+
+@app.get("/api/opportunities", response_model=list[OpportunityRecord])
+def list_opportunities(): return store.opportunities()
+
+@app.get("/api/opportunities/{item_id}", response_model=OpportunityRecord)
+def get_opportunity(item_id: str):
+    item = store.get_opportunity(item_id)
+    if not item: raise HTTPException(404, "Opportunity not found")
+    return item
+
+@app.post("/api/opportunities/{item_id}/run-market", response_model=OpportunityRecord)
+async def run_market(item_id: str):
+    item = store.get_opportunity(item_id)
+    if not item: raise HTTPException(404, "Opportunity not found")
+    if item.status == "SETTLED": raise HTTPException(409, "Settled opportunities cannot be rerun")
+    try:
+        evaluation, risk_status = await integrations.invoice_evaluation(InvoiceEvaluationRequest(invoice=item.invoice))
+        providers = store.providers()
+        market, market_status = await integrations.market(MarketRequest(opportunity_id=item.id, invoice=item.invoice,
+            requirements=item.requirements, verification=evaluation.verification, risk=evaluation.risk, providers=providers))
+    except Exception as exc: raise HTTPException(503, f"Required integration unavailable: {exc}") from exc
+    decision = rank_offers(item.id, item.requirements, evaluation.risk, market.offers,
+                           {provider.id: provider.available_liquidity for provider in providers})
+    item = item.model_copy(update={"status": "MARKET_RUN", "evaluation": evaluation, "offers": market.offers,
+        "match": decision, "integration_status": {"invoice_risk": risk_status, "capital_market": market_status}})
+    store.save_opportunity(item); store.audit("MARKET_CLEARED", f"{len(market.offers)} providers evaluated; recommendation {decision.recommended_offer_id or 'none'}.", item.id)
+    return item
+
+@app.post("/api/opportunities/{item_id}/accept/{offer_id}", response_model=Settlement)
+def accept(item_id: str, offer_id: str):
+    item = store.get_opportunity(item_id)
+    if not item: raise HTTPException(404, "Opportunity not found")
+    try: return store.settle(item, offer_id)
+    except ValueError as exc: raise HTTPException(409, str(exc)) from exc
+
+@app.get("/api/providers")
+def get_providers(): return store.providers()
+
+@app.get("/api/settlements")
+def get_settlements(): return store.settlements()
+
+@app.get("/api/audit")
+def get_audit(): return store.audits()
+
+@app.get("/api/platform/metrics", response_model=PlatformMetrics)
+def metrics():
+    providers = store.providers(); opportunities = store.opportunities(); settlements = store.settlements()
+    offers = [offer for item in opportunities for offer in item.offers if offer.status == "OFFER"]
+    participating = len({offer.provider_id for offer in offers})
+    return PlatformMetrics(available_liquidity=sum(p.available_liquidity for p in providers),
+        active_opportunities=sum(i.status != "SETTLED" for i in opportunities), offers_generated=len(offers),
+        financing_allocated=sum(s.amount for s in settlements), settlements=len(settlements),
+        provider_participation_rate=round(participating / max(len(providers), 1), 2))
+
