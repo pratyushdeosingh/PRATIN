@@ -106,6 +106,19 @@ class InvoiceEvaluation(StrictModel):
     provenance: Literal["SERVICE", "FIXTURE"] = "SERVICE"
 
 
+class RiskLedgerEntry(StrictModel):
+    id: str
+    opportunity_id: str | None = None
+    invoice_number: str
+    supplier_name: str
+    buyer_name: str
+    amount: float = Field(gt=0)
+    evaluated_at: datetime
+    verification: VerificationResult
+    risk: RiskAssessment
+    provenance: Literal["SERVICE", "FIXTURE"] = "SERVICE"
+
+
 class Provider(StrictModel):
     id: str
     name: str
