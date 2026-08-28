@@ -135,7 +135,8 @@ def parse_extracted_text(text: str) -> ExtractedInvoiceFields:
     # 4. Amount
     amount: float | None = None
     amt_patterns = [
-        r'(?i)(?:total\s+amount|grand\s+total|amount\s+due|invoice\s+(?:total|amount)|net\s+payable|balance\s+due|total)\s*[:\-\s]*(?:INR|RS|₹)?[\s\.]*([0-9,]+(?:\.[0-9]{1,2})?)',
+        r'(?i)\b(?:total\s+amount|grand\s+total|amount\s+due|invoice\s+(?:total|amount)|net\s+payable|balance\s+due)\b\s*[:\-\s]*(?:INR|RS|₹)?[\s\.]*([0-9,]+(?:\.[0-9]{1,2})?)',
+        r'(?i)\b(?:total)\b\s*[:\-\s]*(?:INR|RS|₹)?[\s\.]*([0-9,]+(?:\.[0-9]{1,2})?)',
         r'[₹]\s*([0-9,]+(?:\.[0-9]{1,2})?)',
         r'(?i)\bINR\s*([0-9,]+(?:\.[0-9]{1,2})?)\b',
     ]
