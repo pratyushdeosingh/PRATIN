@@ -191,7 +191,7 @@ class MatchDecision(StrictModel):
     recommended_offer_id: str | None
     ranked_offers: list[RankedOffer]
     recommendation_reasons: list[str]
-    policy_version: str = "matching-policy-1.0-demo"
+    policy_version: str = "matching-policy-1.1-demo"
     policy_notice: str = "Prototype policy weights are explainable demonstration parameters, not production-calibrated financial advice."
 
 
@@ -237,4 +237,3 @@ class PlatformMetrics(StrictModel):
 
 def utc_now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
-
