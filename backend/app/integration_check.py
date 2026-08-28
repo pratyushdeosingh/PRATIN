@@ -24,7 +24,7 @@ async def main():
         assert first_offer["provider_id"] == "nbfc-b", first_offer
         astra = next(x for x in first["match"]["ranked_offers"] if x["offer"]["provider_id"] == "bank-a")
         assert astra["eligible"] is False and len(astra["hard_constraint_failures"]) >= 2, astra
-        assert astra["offer"]["status"] == "DECLINE" and astra["offer"]["annual_rate"] is None, astra
+        assert astra["offer"]["annual_rate"] is not None and astra["offer"]["annual_rate"] < first_offer["annual_rate"], astra
         settlement = await checked(client, "POST", f"/api/opportunities/{first['id']}/accept/{first_offer['id']}")
         replay = await checked(client, "POST", f"/api/opportunities/{first['id']}/accept/{first_offer['id']}")
         assert replay["id"] == settlement["id"], (settlement, replay)
