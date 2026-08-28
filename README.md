@@ -8,7 +8,7 @@ PRATIN is a full-stack demonstration of supply-chain working-capital financing. 
 
 ## Why PRATIN
 
-- **PDF invoice intake** — validates a PDF (up to 10 MB), extracts embedded text in memory, shows extracted fields/confidence/missing data, and writes a durable ledger entry.
+- **PDF invoice intake** — validates a PDF (up to 10 MB), extracts embedded text in memory, shows extracted fields/confidence/missing data, persists the parsed invoice to the database, and writes a durable ledger entry.
 - **Explainable risk** — deterministic verification, uncertainty labels, reason codes, and factor-level risk decisions.
 - **Autonomous providers** — each agent runs `OBSERVE → EVALUATE → CONSTRAIN → DECIDE → PRICE → EXPLAIN → ACT` according to its own liquidity, risk appetite, sector fit, ticket size, and portfolio cap.
 - **Hard constraints first** — lowest rate does not win if it cannot meet the amount, timing, cost, or policy requirements.
@@ -64,6 +64,51 @@ SUPABASE_DATABASE_URL=<server-only-pooled-or-direct-Postgres-URL>
 
 Never commit this URL, expose it through `VITE_*`, or send it to the browser. Without it, PRATIN deliberately uses SQLite and shows that state in the UI.
 
+### Local PostgreSQL for parsed-invoice persistence
+
+Parsed invoices are stored durably so they survive backend restarts. To run a local PostgreSQL:
+
+```bash
+docker run -d --name pratin-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:17
+```
+
+Apply the schema (creates the private `pratin` schema and roles):
+
+```bash
+python - <<'PY'
+import os
+from pathlib import Path
+import psycopg
+os.environ["SUPABASE_DATABASE_URL"] = "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
+with psycopg.connect(os.environ["SUPABASE_DATABASE_URL"], autocommit=True) as connection:
+    connection.execute("create role anon; create role authenticated; create role service_role;")
+    for migration in sorted(Path("supabase/migrations").glob("*.sql")):
+        connection.execute(migration.read_text(), prepare=False)
+PY
+```
+
+Start Core against it:
+
+```bash
+PRATIN_DATABASE_BACKEND=supabase \
+SUPABASE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres \
+PRATIN_INTEGRATION_MODE=required \
+python -m uvicorn backend.app.main:app --port 8000
+```
+
+Query the database interactively (requires `brew install libpq` for the `psql` client):
+
+```bash
+psql "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
+```
+
+```sql
+\dt pratin.*            -- tables: opportunities, providers, settlements, audit_events, invoices
+SELECT * FROM pratin.invoices ORDER BY created_at DESC;
+SELECT jsonb_pretty(payload) FROM pratin.invoices LIMIT 1;
+\q
+```
+
 ## Local development
 
 ```powershell
@@ -99,6 +144,8 @@ Use `PRATIN_INTEGRATION_MODE=fixture` for a fully deterministic in-process demo.
 |---|---|---|
 | `POST` | `/api/opportunities` | Admit a structured invoice and financing requirements |
 | `POST` | `/api/invoices/parse-pdf` | Validate, parse, evaluate, and persist an invoice PDF |
+| `GET` | `/api/invoices` | Durable persisted invoice records (survive restarts) |
+| `GET` | `/api/invoices/{invoice_number}` | Fetch one persisted invoice record |
 | `POST` | `/api/opportunities/{id}/run-market` | Verify, assess risk, generate offers, and match |
 | `POST` | `/api/opportunities/{id}/accept/{offer_id}` | Idempotent simulated settlement |
 | `GET` | `/api/opportunities` | Durable market history |
@@ -121,7 +168,7 @@ python -m backend.app.integration_check
 docker compose config --quiet
 ```
 
-Current baseline: **168 passing Python tests**, **6 Postgres-only tests skipped unless `PRATIN_TEST_POSTGRES_URL` is configured**, and **8 passing frontend tests**. Coverage includes PDF validation/parsing, duplicate and consistency detection, synthetic GSTIN-format checks, risk explanation/what-if simulations, provider-agent constraints and pricing, matching, replay-safe settlement, rollback, stale-state protection, persistence selection, the end-to-end two-allocation flow, counterfactual simulations, and evidence/provenance handling for the Capital Agents research cockpit.
+Current baseline: **173 passing Python tests**, **6 Postgres-only tests skipped unless `PRATIN_TEST_POSTGRES_URL` is configured**, and **8 passing frontend tests**. Coverage includes PDF validation/parsing, parsed-invoice persistence (upsert, restart survival, endpoints), duplicate and consistency detection, synthetic GSTIN-format checks, risk explanation/what-if simulations, provider-agent constraints and pricing, matching, replay-safe settlement, rollback, stale-state protection, persistence selection, the end-to-end two-allocation flow, counterfactual simulations, and evidence/provenance handling for the Capital Agents research cockpit.
 
 ## Repository map
 
@@ -196,7 +243,7 @@ create opportunity
   → atomically update provider + opportunity + settlement + audit
 ```
 
-The PDF route follows the same trust model. Core checks file type and a 10 MB limit, forwards the bytes to Invoice & Risk, then persists a validated opportunity and audit events only when a usable invoice/evaluation is returned.
+The PDF route follows the same trust model. Core checks file type and a 10 MB limit, forwards the bytes to Invoice & Risk, then persists a validated opportunity, a durable `pratin.invoices` record, and audit events only when a usable invoice/evaluation is returned. The response includes the persisted invoice record.
 
 ### 3. Invoice & Risk Agent
 
@@ -256,7 +303,7 @@ The store abstraction is selected by [`backend/app/store_factory.py`](backend/ap
 | SQLite | Default local/offline path and tests | Deterministic durable demo state at `PRATIN_DB_PATH` |
 | Supabase Postgres | When explicitly configured with a server-only URL | Private `pratin` schema for durable marketplace state |
 
-Both stores own opportunities, providers, settlements, and audit events. A settlement is idempotent: accepting the same recommended offer again returns the original settlement rather than subtracting liquidity twice. Before the mutation, the backend rechecks the recommendation and current mutable provider capacity, preventing stale offers from being accepted. Postgres performs the corresponding work in a transaction with row locking; SQLite implements the same store contract for the offline demo.
+Both stores own opportunities, providers, settlements, audit events, and parsed invoices. A parsed invoice is upserted by invoice number into the `pratin.invoices` table with its full structured payload, status, and timestamps — the parser stays the single source of truth for extraction, while the database keeps the parsed outcome durable across backend restarts. A settlement is idempotent: accepting the same recommended offer again returns the original settlement rather than subtracting liquidity twice. Before the mutation, the backend rechecks the recommendation and current mutable provider capacity, preventing stale offers from being accepted. Postgres performs the corresponding work in a transaction with row locking; SQLite implements the same store contract for the offline demo.
 
 ### 7. Integration modes and failure behavior
 
