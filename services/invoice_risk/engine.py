@@ -16,6 +16,19 @@ from contracts.models import (
 )
 
 
+RISK_POLICY_WEIGHTS = {
+    "BASE_SCORE": 38.0,
+    "BUYER_RATING_MULTIPLIER": -18.0,
+    "MATURITY_NEAR_DUE": 8.0,
+    "MATURITY_SHORT_TENOR": 5.0,
+    "MATURITY_MEDIUM_TENOR": 2.0,
+    "VERIFICATION_UNCERTAIN": 12.0,
+    "VERIFICATION_REJECTED": 45.0,
+    "DUPLICATE_INVOICE": 35.0,
+    "AMOUNT_MISMATCH": 20.0,
+}
+
+
 def check_duplicate_invoice(invoice: Invoice, existing_invoices: list[Invoice] | None = None) -> DuplicateCheckResult:
     """Deterministic duplicate invoice detection based on normalized invoice attributes."""
     if not existing_invoices:
@@ -322,26 +335,26 @@ def assess_risk(invoice: Invoice, verification: VerificationResult) -> RiskAsses
     elif verification.status != VerificationStatus.REJECTED and invoice.due_date > today:
         days_until_due = (invoice.due_date - today).days
         if days_until_due <= 14:
-            factor("Invoice maturity", 8.0, f"Invoice is due in {days_until_due} days, increasing repayment-urgency risk.", "MATURITY_NEAR_DUE")
+            factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_NEAR_DUE"], f"Invoice is due in {days_until_due} days, increasing repayment-urgency risk.", "MATURITY_NEAR_DUE")
         elif days_until_due <= 30:
-            factor("Invoice maturity", 5.0, f"Invoice is due in {days_until_due} days, short tenor window.", "MATURITY_SHORT_TENOR")
+            factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_SHORT_TENOR"], f"Invoice is due in {days_until_due} days, short tenor window.", "MATURITY_SHORT_TENOR")
         elif days_until_due <= 60:
-            factor("Invoice maturity", 2.0, f"Invoice is due in {days_until_due} days, moderate tenor window.", "MATURITY_MEDIUM_TENOR")
+            factor("Invoice maturity", RISK_POLICY_WEIGHTS["MATURITY_MEDIUM_TENOR"], f"Invoice is due in {days_until_due} days, moderate tenor window.", "MATURITY_MEDIUM_TENOR")
 
     # 7. Verification uncertainty / rejection
     if verification.status == VerificationStatus.PARTIALLY_VERIFIED:
-        factor("Verification uncertainty", 12.0, "Missing fields increase information asymmetry.", "VERIFICATION_UNCERTAIN")
+        factor("Verification uncertainty", RISK_POLICY_WEIGHTS["VERIFICATION_UNCERTAIN"], "Missing fields increase information asymmetry.", "VERIFICATION_UNCERTAIN")
     elif verification.status == VerificationStatus.REJECTED:
-        factor("Verification rejected", 45.0, "Invoice failed the synthetic verification policy.", "VERIFICATION_REJECTED")
+        factor("Verification rejected", RISK_POLICY_WEIGHTS["VERIFICATION_REJECTED"], "Invoice failed the synthetic verification policy.", "VERIFICATION_REJECTED")
 
     # 8. Duplicate invoice factor
     if verification.duplicate_check and verification.duplicate_check.duplicate_detected:
         matched_no = verification.duplicate_check.matched_invoice_number or "prior invoice"
-        factor("Duplicate invoice", 35.0, f"Invoice matches prior submission {matched_no} across supplier, buyer, and amount.", "DUPLICATE_INVOICE")
+        factor("Duplicate invoice", RISK_POLICY_WEIGHTS["DUPLICATE_INVOICE"], f"Invoice matches prior submission {matched_no} across supplier, buyer, and amount.", "DUPLICATE_INVOICE")
 
     # 9. Amount consistency mismatch factor
     if "AMOUNT_MISMATCH" in verification.reason_codes:
-        factor("Amount consistency mismatch", 20.0, "Declared invoice total does not reconcile with subtotal plus tax.", "AMOUNT_MISMATCH")
+        factor("Amount consistency mismatch", RISK_POLICY_WEIGHTS["AMOUNT_MISMATCH"], "Declared invoice total does not reconcile with subtotal plus tax.", "AMOUNT_MISMATCH")
 
     score = round(max(0.0, min(100.0, score)), 1)
     band = RiskBand.LOW if score < 30 else RiskBand.MODERATE if score < 55 else RiskBand.HIGH if score < 75 else RiskBand.SEVERE
