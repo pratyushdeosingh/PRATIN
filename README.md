@@ -139,7 +139,7 @@ docs/                    Architecture, demo script, integration and judging note
 
 PRATIN is a demonstrator, not a production finance platform. Real deployment requires regulated data/settlement integrations, KYC/KYB and e-invoice validation, fraud controls, RBAC, encryption and key management, observability, model governance, privacy controls, and legal/compliance review.
 
-Named for Pratyush, Pratham, and Nitin. See the [team guide](docs/team-start-here.md), [architecture notes](docs/architecture.md), and [demo script](docs/demo-script.md).
+Built as a hackathon demonstrator. See the [architecture notes](docs/architecture.md), [integration contract](docs/integration.md), and [demo script](docs/demo-script.md).
 
 ## Advanced capabilities
 
@@ -234,7 +234,7 @@ Verification and risk output are explanatory—not evidence of banking, legal, G
 
 [`backend/app/matching.py`](backend/app/matching.py) is deliberately separate from the provider agents. Providers decide whether and how they participate; Core decides whether an offer actually meets the supplier's mandate.
 
-An offer is ineligible when it is a provider decline or misses the required capital, settlement ceiling, or optional supplier cost ceiling. Only eligible offers are scored. The current `matching-policy-1.1-demo` is:
+An offer is ineligible when it is a provider decline or misses the required capital, settlement ceiling, or optional supplier cost ceiling. Only eligible offers are scored. The default `matching-policy-1.2-smart-match` is:
 
 | Factor | Weight | Meaning |
 |---|---:|---|
@@ -245,7 +245,7 @@ An offer is ineligible when it is a provider decline or misses the required capi
 | Risk-adjusted return | 8% | Provider return in the context of invoice risk |
 | Remaining liquidity | 8% | Provider capacity remaining before allocation |
 
-The API returns every factor's raw score, weight, explanation, weighted suitability, hard-constraint failures, rank, recommendation reasons, and policy version. The weights sum to 100%; they are demo policy parameters, not a production credit model.
+The API returns every factor's raw score, weight, explanation, weighted suitability, hard-constraint failures, rank, recommendation reasons, and policy version. Suppliers can explicitly select balanced, fastest, lowest-fee, or highest-advance priorities; hard eligibility rules always apply first. The weights are demo policy parameters, not a production credit model.
 
 ### 6. Persistence, state, and settlement
 
